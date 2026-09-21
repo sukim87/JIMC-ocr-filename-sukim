@@ -32,7 +32,6 @@ if uploaded_file is not None:
             st.image(image, caption="업로드된 문서 미리보기", use_container_width=True)
             
             with st.spinner("AI가 문서를 정밀 분석 중입니다..."):
-                # OCR 설정 보완 (공백과 줄바꿈 유지 최적화)
                 text = pytesseract.image_to_string(image, lang='kor+eng', config='--psm 6')
                 
                 # 1. 수주번호 추출
@@ -45,37 +44,43 @@ if uploaded_file is not None:
                     if alt_order:
                         order_no = alt_order.group(1).strip()
 
-                # 2. [완전 신규 방식] 의뢰일자 추출: 문서 내 모든 날짜 형태 강력 탐색 후 첫 번째 값 확정
+                # 2. [집중 개선] 의뢰일자 추출 (문서 내 모든 날짜 형태 유연 탐색)
                 date = ""
-                # 형태 1: YYYY-MM-DD 또는 YYYY.MM.DD 또는 YYYY/MM/DD
-                date_match = re.search(r'(20[2-9][0-9][-/.][0-9]{2][-/.][0-9]{2})', text)
+                # 형태 A: 202X-XX-XX 또는 202X.XX.XX 또는 202X/XX/XX (구분자 포함)
+                date_match = re.search(r'(20[2-9][0-9][\s\-./]*[0-9]{2}[\s\-./]*[0-9]{2})', text)
                 if date_match:
-                    date = date_match.group(1).strip().replace("-", "").replace(".", "").replace("/", "")
-                else:
-                    # 형태 2: 202X로 시작하는 붙어있는 8자리 숫자
-                    all_8digit = re.findall(r'(20[2-9][0-9][0-9]{4})', text)
-                    if all_8digit:
-                        date = all_8digit[0]
+                    # 숫자만 깔끔하게 추출하여 8자리로 만들기
+                    raw_date = date_match.group(1)
+                    digits_only = re.sub(r'[^0-9]', '', raw_date)
+                    if len(digits_only) == 8:
+                        date = digits_only
+                
+                # 만약 위에서 못 찾았을 경우 8자리 연속 숫자 탐색
+                if not date:
+                    all_8dig = re.findall(r'(20[2-9][0-9][0-9]{4})', text)
+                    if all_8dig:
+                        date = all_8dig[0]
 
-                # 3. [완전 신규 방식] 업체명 추출: '업체소재지' 근처 상단 영역 탐색
+                # 3. [집중 개선] 업체명 추출 ('업체소재지' 근처의 진짜 상호명 포착)
                 vendor = ""
-                # 텍스트 라인별로 쪼개서 '업체소재지'나 'Vendor'가 포함된 줄 주변 탐색
                 lines = [line.strip() for line in text.split('\n') if line.strip()]
                 
                 for idx, line in enumerate(lines):
-                    if "업체소재지" in line or "Vendor" in line:
-                        # 바로 위쪽 줄이나 아래쪽 줄에서 주소(시/도)가 포함되지 않은 순수 상호명 후보 탐색
-                        search_pool = []
-                        if idx > 0: search_pool.append(lines[idx - 1])
-                        if idx + 1 < len(lines): search_pool.append(lines[idx + 1])
-                        search_pool.append(line)
+                    if "업체소재지" in line or "Vendor" in line or "Address" in line:
+                        # 해당 줄과 주변 줄(위/아래)을 합쳐서 상호명 후보군 수집
+                        pool = []
+                        if idx > 0: pool.append(lines[idx - 1])
+                        pool.append(line)
+                        if idx + 1 < len(lines): pool.append(lines[idx + 1])
+                        if idx + 2 < len(lines): pool.append(lines[idx + 2])
                         
-                        for pool_line in search_pool:
-                            # 키워드 및 주소성 단어, 특수문자 제거 후 남은 단어 추출
-                            cleaned = re.sub(r'업체소재지|Vendor|Address|[0-9\(\)\-\.]', '', pool_line).strip()
+                        for p_line in pool:
+                            # 라벨명 및 주소성 키워드, 특수문자 제거
+                            cleaned = re.sub(r'업체소재지|Vendor|Address|[\(\)\-\.,0-9]', '', p_line).strip()
                             words = cleaned.split()
                             for w in words:
-                                if len(w) >= 2 and not any(loc in w for loc in ["경상남도", "경기도", "충청도", "서울시", "부산시", "대구시", "인천시", "광주시", "대전시", "울산시", "강원도", "전라도", "제주시", "시", "도", "군", "구", "읍", "면", "동", "길", "로", "번지"]):
+                                # 행정구역 이름이나 너무 짧은 글자가 아닌 순수 상호명 단어 채택
+                                if len(w) >= 2 and not any(loc in w for loc in ["경상", "경기", "충청", "서울", "부산", "대구", "인천", "광주", "대전", "울산", "강원", "전라", "제주", "시", "군", "구", "읍", "면", "동", "길", "로", "번지"]):
                                     vendor = w
                                     break
                             if vendor:
@@ -83,8 +88,8 @@ if uploaded_file is not None:
                     if vendor:
                         break
 
-                # 만약 위 방식으로도 못 찾았을 경우, 문서 상단 10줄 내에서 가장 상호명스러운 텍스트 추출
-                if not vendor or len(vendor) < 2:
+                # 예외 안전 장치: 문서 상단에서 의미 있는 한글/영문 단어 찾기
+                if not vendor or len(vendor) < 2 or vendor in ["Lb", "Vendor", "Address"]:
                     for line in lines[:10]:
                         clean_line = re.sub(r'[^가-힣a-zA-Z]', '', line)
                         if len(clean_line) >= 2 and not any(k in clean_line for k in ["구매", "담당", "자재", "품질", "검사", "인수", "의뢰서", "보고서", "소재지", "Procurement", "Quality", "RECEIVING"]):
