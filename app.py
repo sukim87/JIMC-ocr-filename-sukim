@@ -35,19 +35,17 @@ if uploaded_file is not None:
             st.image(image, caption="업로드된 문서 미리보기", use_container_width=True)
             
             with st.spinner("AI가 문서를 정밀 분석 중입니다..."):
-                # 1. 이미지 전처리 (OpenCV를 이용한 흑백 대비 강화 및 노이즈 제거)
+                # 1. 이미지 전처리 완화 (강제 이진화 제거, 그레이스케일만 적용하여 한글 획 보존)
                 img_np = np.array(image)
                 if len(img_np.shape) == 3:
                     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
                 else:
                     gray = img_np
                 
-                # 이진화 처리 (글씨를 더 선명하게 만듦)
-                _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
-                processed_image = Image.fromarray(thresh)
+                processed_image = Image.fromarray(gray)
 
-                # 2. 표 인식률이 높은 Tesseract 설정 적용 (--psm 6: 단일 텍스트 블록 가정)
-                custom_config = r'--oem 3 --psm 6'
+                # 2. 테서셋 설정 (PSM을 3 또는 11로 주어 한글/영어 혼용 표 인식률 향상)
+                custom_config = r'--oem 3 --psm 3'
                 full_text = pytesseract.image_to_string(processed_image, lang='kor+eng', config=custom_config)
                 data_df = pytesseract.image_to_data(processed_image, output_type=pytesseract.Output.DATAFRAME, lang='kor+eng', config=custom_config)
                 data_df = data_df[data_df.text.notnull() & (data_df.text.str.strip() != '')]
@@ -79,7 +77,7 @@ if uploaded_file is not None:
                             date = digits
                             break
 
-                # 5. 업체명 추출 ('업체소재지' 우측 칸의 정확한 텍스트 라인 타겟팅)
+                # 5. 업체명 추출 ('업체소재지' 우측 칸의 한글 상호명 타겟팅)
                 vendor = ""
                 vendor_label = data_df[data_df['text'].str.contains('업체소재지|Vendor', na=False)]
                 if not vendor_label.empty:
@@ -110,6 +108,7 @@ if uploaded_file is not None:
                                 continue
                             if any(addr_k in w for addr_k in ['로', '길', '동', '호', '부산', '창원', '시', '구']):
                                 continue
+                            # 한글 및 영문, 숫자만 허용
                             clean_w = re.sub(r'[^가-힣a-zA-Z0-9]', '', w)
                             if len(clean_w) > 0:
                                 extracted_words.append(clean_w)
