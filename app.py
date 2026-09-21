@@ -34,7 +34,7 @@ if uploaded_file is not None:
             with st.spinner("AI가 문서를 정밀 분석 중입니다..."):
                 text = pytesseract.image_to_string(image, lang='kor+eng')
                 
-                # 1. 수주번호 추출 (H로 시작하는 패턴 우선 탐색)
+                # 1. 수주번호 추출
                 order_no = ""
                 order_match = re.search(r'(H[0-9]{6}[A-Za-z0-9\-]+)', text)
                 if order_match:
@@ -44,41 +44,30 @@ if uploaded_file is not None:
                     if alt_order:
                         order_no = alt_order.group(1).strip()
 
-                # 2. 의뢰일자 추출 ('의뢰일자' 또는 'Issue Date' 키워드 주변 바운더리 탐색)
+                # 2. 의뢰일자 추출 (YYYY-MM-DD 등 형태 탐색 후 8자리로 변환)
                 date = ""
-                date_bound_match = re.search(r'(?:의뢰일자|Issue\s*Date)[^\d]*(20[2-9][0-9][-/.][0-9]{2][-/.][0-9]{2})', text, re.IGNORECASE)
-                if date_bound_match:
-                    date = date_bound_match.group(1).strip().replace("-", "").replace(".", "").replace("/", "")
+                date_match = re.search(r'(20[2-9][0-9][-/.][0-9]{2][-/.][0-9]{2})', text)
+                if date_match:
+                    date = date_match.group(1).strip().replace("-", "").replace(".", "").replace("/", "")
                 else:
-                    # 문서 내 첫 번째로 등장하는 날짜 형태 탐색
-                    date_match = re.search(r'(20[2-9][0-9][-/.][0-9]{2][-/.][0-9]{2})', text)
-                    if date_match:
-                        date = date_match.group(1).strip().replace("-", "").replace(".", "").replace("/", "")
+                    all_dates = re.findall(r'(20[2-9][0-9][0-9]{4})', text)
+                    if all_dates:
+                        date = all_dates[0]
 
-                # 3. 업체명 추출 ('업체소재지' / 'Vendor Address' 키워드 바운더리 내 상호명 동적 추출)
+                # 3. 업체명 추출: '업체소재지' 또는 'Vendor Address' 바로 오른쪽 칸의 첫 번째 단어 픽업
                 vendor = ""
-                # '업체소재지' 또는 'Vendor Address' 바로 뒤의 셀 영역 텍스트 추출
-                vendor_bound = re.search(r'(?:업체소재지|Vendor\s*Address)[^\n]*\n+([^\n]+)', text, re.IGNORECASE)
-                if vendor_bound:
-                    raw_vendor_line = vendor_bound.group(1).strip()
-                    # 만약 주소(경상남도 등)가 함께 잡혔다면, 주소 앞의 상호명만 분리
-                    # 예: "신진볼텍 경상남도 창원시..." -> "신진볼텍" 추출
-                    clean_vendor = re.split(r'(?:경상남도|경기도|충청도|서울시|부산시|대구시|인천시|광주시|대전시|울산시|강원도|전라도|제주시|[0-9]{2,})', raw_vendor_line)[0].strip()
-                    if clean_vendor and len(clean_vendor) > 1:
-                        vendor = clean_vendor
-                    else:
-                        vendor = raw_vendor_line.split()[0] if raw_vendor_line else ""
+                vendor_match = re.search(r'(?:업체소재지|Vendor\s*Address)\s*([\S]+)', text, re.IGNORECASE)
+                if vendor_match:
+                    candidate = vendor_match.group(1).strip()
+                    # 혹시라도 라벨 조각이 딸려온 경우 방어
+                    if candidate.lower() not in ['vendor', 'address']:
+                        vendor = candidate
 
-                # 바운더리에서 못 찾았을 경우 상단 영역에서 첫 번째 유효 상호명 동적 탐색 (하드코딩 없음)
+                # 만약 위에서 못 잡았을 경우의 안전 장치
                 if not vendor or len(vendor) < 2:
-                    lines = text.split('\n')
-                    for line in lines[:10]:
-                        cleaned = re.sub(r'[^가-힣a-zA-Z]', '', line)
-                        if len(cleaned) >= 2 and not any(k in cleaned for k in ["구매", "담당", "자재", "품질", "검사", "인수", "의뢰서", "보고서", "소재지", "Vendor"]):
-                            vendor = cleaned
-                            break
+                    vendor = "업체명확인필요"
 
-                # 4. 발주서번호 추출 (P로 시작하는 번호 탐색)
+                # 4. 발주서번호 추출
                 po_no = ""
                 po_match = re.search(r'(P[0-9]{10,})', text)
                 if po_match:
