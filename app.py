@@ -10,7 +10,7 @@ os.environ['PATH'] += os.pathsep + '/usr/bin'
 st.set_page_config(page_title="인수검사서 파일명 자동 생성기", page_icon="📄", layout="centered")
 
 st.title("📄 인수검사서 파일명 자동 생성기")
-st.write("스캔된 PDF나 이미지 파일을 업로드하면 문서 표 영역을 정밀 잘라내어 분석합니다.")
+st.write("스캔된 PDF나 이미지 파일을 업로드하면 문서 표 구조를 분석하여 올바른 파일명을 만들어 줍니다.")
 st.markdown("---")
 
 uploaded_file = st.file_uploader("파일을 업로드하세요 (PDF, JPG, PNG)", type=["pdf", "png", "jpg", "jpeg"])
@@ -32,13 +32,12 @@ if uploaded_file is not None:
         if image:
             st.image(image, caption="업로드된 문서 미리보기", use_container_width=True)
             
-            with st.spinner("AI가 표 영역을 잘라내어 정밀 분석 중입니다..."):
-                img_w, img_h = image.size
+            with st.spinner("AI가 문서를 정밀 분석 중입니다..."):
                 full_text = pytesseract.image_to_string(image, lang='kor+eng')
                 data_df = pytesseract.image_to_data(image, output_type=pytesseract.Output.DATAFRAME, lang='kor+eng')
                 data_df = data_df[data_df.text.notnull() & (data_df.text.str.strip() != '')]
 
-                # 1. 수주번호 추출 (기존 방식 유지 - 정확함)
+                # 1. 수주번호 추출
                 order_no = ""
                 order_match = re.search(r'(H[0-9]{6}[A-Za-z0-9\-]+)', full_text)
                 if order_match:
@@ -48,70 +47,71 @@ if uploaded_file is not None:
                     if alt_order:
                         order_no = alt_order.group(1).strip()
 
-                # 2. [ROI 크로핑] 의뢰일자 추출 ('의뢰일자' 또는 'Issue' 키워드 오른쪽 칸 잘라내기)
+                # 2. 의뢰일자 추출: RIN 시작 번호 바로 아래(또는 우측 아래)의 날짜 탐색
                 date = ""
-                date_label = data_df[data_df['text'].str.contains('의뢰일자|Issue|Date', na=False)]
-                if not date_label.empty:
-                    dl_row = date_label.iloc[0]
-                    # 키워드 우측 칸 영역 설정 (좌측 끝 ~ 우측으로 적당한 폭, 상하 여유)
-                    crop_left = max(0, dl_row['left'] + dl_row['width'] - 10)
-                    crop_top = max(0, dl_row['top'] - 10)
-                    crop_right = min(img_w, crop_left + int(img_w * 0.25)) # 대략 25폭
-                    crop_bottom = min(img_h, dl_row['top'] + dl_row['height'] + 20)
+                rin_label = data_df[data_df['text'].str.contains('RIN', na=False)]
+                if not rin_label.empty:
+                    rin_row = rin_label.iloc[0]
+                    rin_top, rin_left = rin_row['top'], rin_row['left']
                     
-                    date_crop = image.crop((crop_left, crop_top, crop_right, crop_bottom))
-                    date_crop_text = pytesseract.image_to_string(date_crop, lang='kor+eng', config='--psm 7')
+                    # RIN 번호가 있는 행보다 아래쪽(top 차이 +20 ~ +60 픽셀)이면서 X좌표가 비슷한 위치 탐색
+                    below_tokens = data_df[
+                        (data_df['top'] >= rin_top + 15) & 
+                        (data_df['top'] <= rin_top + 70) & 
+                        (data_df['left'] >= rin_left - 30) &
+                        (data_df['left'] <= rin_left + 150)
+                    ].sort_values(by=['top', 'left'])
                     
-                    # 잘라낸 영역에서 날짜 추출
-                    d_m = re.search(r'([0-9]{4}[-/.][0-9]{2}[-/.][0-9]{2})', date_crop_text)
-                    if d_m:
-                        date = re.sub(r'[^0-9]', '', d_m.group(1))
-                    else:
-                        digits = re.sub(r'[^0-9]', '', date_crop_text)
-                        if len(digits) >= 8 and digits.startswith('20'):
-                            date = digits[:8]
+                    for _, r in below_tokens.iterrows():
+                        w = r['text'].strip()
+                        # 8자리 날짜 또는 YYYY-MM-DD 형태 매칭
+                        date_m = re.search(r'([0-9]{4}[-/.?[0-9]{2}[-/.?[0-9]{2})', w)
+                        if date_m:
+                            digits = re.sub(r'[^0-9]', '', date_m.group(1))
+                            if len(digits) == 8 and digits.startswith('20'):
+                                date = digits
+                                break
+                        digits_only = re.sub(r'[^0-9]', '', w)
+                        if len(digits_only) == 8 and digits_only.startswith('20'):
+                            date = digits_only
+                            break
 
-                # 보조 Fallback (좌표 탐색 실패 시 전체 텍스트 검색)
+                # 만약 위 방법으로 못 찾았을 경우 일반 날짜 패턴 탐색
                 if not date:
-                    dm_all = re.search(r'(20[2-9][0-9][-/.][0-9]{2][-/.][0-9]{2})', full_text)
-                    if dm_all:
-                        date = re.sub(r'[^0-9]', '', dm_all.group(1))
+                    date_match = re.search(r'(20[2-9][0-9][-/.][0-9]{2][-/.][0-9]{2})', full_text)
+                    if date_match:
+                        date = re.sub(r'[^0-9]', '', date_match.group(1))
 
-                # 3. [ROI 크로핑] 업체명 추출 ('업체소재지' 키워드 바로 오른쪽 칸 잘라내기)
+                # 3. 업체명 추출: '업체소재지' 바로 옆 상단 칸에서 주소 제외하고 상호명만 추출
                 vendor = ""
                 vendor_label = data_df[data_df['text'].str.contains('업체소재지|Vendor', na=False)]
                 if not vendor_label.empty:
-                    vl_row = vendor_label.iloc[0]
-                    # '업체소재지' 우측 칸 영역 설정 (상호명이 들어있는 위치)
-                    crop_left = max(0, vl_row['left'] + vl_row['width'] - 15)
-                    crop_top = max(0, vl_row['top'] - 15)
-                    crop_right = min(img_w, crop_left + int(img_w * 0.35)) # 적당한 가로 폭
-                    crop_bottom = min(img_h, vl_row['top'] + 50) # 상호명과 주소 첫 줄 포함
+                    v_row = vendor_label.iloc[0]
+                    v_top, v_left = v_row['top'], v_row['left']
                     
-                    vendor_crop = image.crop((crop_left, crop_top, crop_right, crop_bottom))
-                    vendor_crop_text = pytesseract.image_to_string(vendor_crop, lang='kor+eng', config='--psm 6')
+                    # '업체소재지' 바로 오른쪽 영역이면서 주소(아랫줄)로 내려가지 않도록 상하 폭을 좁게 제한
+                    vendor_tokens = data_df[
+                        (data_df['top'] >= v_top - 10) & 
+                        (data_df['top'] <= v_top + 25) & 
+                        (data_df['left'] > v_left + v_row['width'] - 10)
+                    ].sort_values(by=['left'])
                     
-                    # 잘라낸 영역의 첫 번째 줄 또는 의미 있는 상호명 추출
-                    lines = [l.strip() for l in vendor_crop_text.split('\n') if l.strip()]
-                    for l in lines:
-                        cleaned = re.sub(r'[^가-힣a-zA-Z0-9]', '', l)
-                        if len(cleaned) >= 2 and cleaned.lower() not in ['vendor', 'address', '업체소재지']:
-                            # 행정구역 및 주소 단어 제외하고 첫 번째로 등장하는 진짜 상호명 채택
-                            if not any(loc in cleaned for loc in ["경상", "경기", "충청", "서울", "부산", "대구", "인천", "광주", "대전", "울산", "강원", "전라", "제주", "창원", "시", "군", "구", "읍", "면", "동", "길", "로", "번지"]):
-                                vendor = cleaned
-                                break
-                    # 만약 첫 줄에 걸러지지 않았다면 정제된 첫 번째 텍스트 사용
-                    if not vendor and lines:
-                        for l in lines:
-                            c = re.sub(r'[^가-힣a-zA-Z0-9]', '', l)
-                            if len(c) >= 2 and c.lower() not in ['vendor', 'address', '업체소재지']:
-                                vendor = c
-                                break
+                    extracted_words = []
+                    for _, r in vendor_tokens.iterrows():
+                        w = r['text'].strip()
+                        clean_w = re.sub(r'[^가-힣a-zA-Z0-9]', '', w)
+                        if len(clean_w) >= 2 and clean_w.lower() not in ['vendor', 'address', '업체소재지']:
+                            # 행정구역 및 주소 관련 단어는 확실하게 제외
+                            if not any(loc in clean_w for loc in ["경상", "경기", "충청", "서울", "부산", "대구", "인천", "광주", "대전", "울산", "강원", "전라", "제주", "창원", "시", "군", "구", "읍", "면", "동", "길", "로", "번지"]):
+                                extracted_words.append(clean_w)
+                    
+                    if extracted_words:
+                        vendor = "".join(extracted_words)
 
                 if not vendor or len(vendor) < 2:
                     vendor = "업체명확인필요"
 
-                # 4. 발주서번호 추출 (기존 방식 유지 - 정확함)
+                # 4. 발주서번호 추출
                 po_no = ""
                 po_match = re.search(r'(P[0-9]{10,})', full_text)
                 if po_match:
