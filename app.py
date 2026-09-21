@@ -13,148 +13,112 @@ st.title("📄 인수검사서 파일명 자동 생성기")
 st.write("스캔된 PDF나 이미지 파일을 업로드하면 문서 표 구조를 분석하여 올바른 파일명을 만들어 줍니다.")
 st.markdown("---")
 
-uploaded_file = st.file_uploader("파일을 업로드하세요 (PDF, JPG, PNG)", type=["pdf", "png", "jpg", "jpeg"])
 
 # ============================================================
-# 🔧 헬퍼 함수들
+# 🔧 헬퍼 함수
 # ============================================================
 def is_address_like(text: str) -> bool:
-    """주소로 보이는 텍스트인지 판별 (시/도/구/동/로/길/번길/호 등)"""
-    # 순수 숫자/기호는 주소로 간주
+    """주소로 보이는 텍스트 판별"""
     if re.fullmatch(r'[\d\s\-().]+', text):
         return True
-    # 주소 키워드가 들어간 경우
-    addr_keywords = ['광역시', '특별시', '특별자치', '번길', '로 ', '길 ', '동 ', '읍 ', '면 ']
-    if any(k in text for k in addr_keywords):
+    if any(k in text for k in ['광역시', '특별시', '특별자치', '번길', '사우', '층']):
         return True
-    # 시/도/구/동/로/길/호 로 끝나는 경우
     if re.search(r'(시|도|구|군|동|읍|면|로|길|번길|호|층)$', text):
         return True
     return False
 
 
-def is_company_like(text: str) -> bool:
-    """상호명으로 보이는 텍스트인지 판별"""
-    if len(text) < 2:
-        return False
-    # 한글/영문/숫자 조합이고, 주소 패턴이 아니어야 함
-    if not re.search(r'[가-힣a-zA-Z]', text):
-        return False
-    if is_address_like(text):
-        return False
-    # 특수문자만 있는 경우 제외
-    if re.fullmatch(r'[^\w가-힣]+', text):
-        return False
-    return True
-
-
 def extract_vendor_name(data_df: pd.DataFrame, full_text: str) -> str:
     """
-    '업체소재지' 앵커의 우측 셀에서 상호명만 정밀 추출
-    - 결재란(좌측 세로쓰기)과 주소(2번째 줄)를 완전히 배제
+    '업체소재지' 앵커의 우측 값 셀에서 상호명만 정밀 추출
+    - 라벨 셀에 포함된 'Vendor', 'Address' 영어 라벨을 완전 차단
+    - 앵커와 같은 행(회사명 줄)의 토큰만 사용하여 주소 줄 배제
     """
-    # 1) 앵커 탐색: '업체소재지' 또는 'Vendor' 포함 토큰
-    anchor_candidates = data_df[
-        data_df['text'].str.contains('업체소재지|업체 소재지|Vendor', na=False, case=False)
+    # 1) 앵커 찾기 (한글 우선, 없으면 영문)
+    kor_anchors = data_df[data_df['text'].str.contains('업체|소재지', na=False)]
+    if not kor_anchors.empty:
+        anchor = kor_anchors.sort_values(
+            by=['top', 'conf'], ascending=[True, False]
+        ).iloc[0]
+    else:
+        eng = data_df[data_df['text'].str.contains('Vendor', na=False, case=False)]
+        if eng.empty:
+            return ""
+        anchor = eng.sort_values(by='top').iloc[0]
+
+    a_top, a_left = anchor['top'], anchor['left']
+    a_width, a_height = anchor['width'], anchor['height']
+
+    # 2) 라벨 셀의 '진짜 오른쪽 경계' 계산
+    #    (업체소재지 + Vendor + Address 중 가장 오른쪽 끝)
+    row_band = data_df[
+        (data_df['top'] >= a_top - 5) &
+        (data_df['top'] <= a_top + a_height + 35)
     ]
-    if anchor_candidates.empty:
-        # 폴백: '업체' 포함 토큰 중 가장 신뢰도 높은 것
-        anchor_candidates = data_df[
-            data_df['text'].str.contains('업체', na=False)
-        ].sort_values(by='conf', ascending=False)
+    label_mask = row_band['text'].str.contains(
+        r'업체|소재지|Vendor|Address', na=False, case=False, regex=True
+    )
+    label_tokens = row_band[label_mask]
+    if not label_tokens.empty:
+        label_cell_right = (label_tokens['left'] + label_tokens['width']).max()
+    else:
+        label_cell_right = a_left + a_width
 
-    if anchor_candidates.empty:
-        return ""
-
-    anchor = anchor_candidates.iloc[0]
-    a_top = anchor['top']
-    a_left = anchor['left']
-    a_width = anchor['width']
-    a_height = anchor['height']
-
-    # 2) 앵커 우측 셀 영역 설정
-    #    - x: 앵커 오른쪽 끝 ~ +350px (셀 폭 고려)
-    #    - y: 앵커 상단 -20 ~ +60px (상호명+주소 두 줄 커버)
-    cell_x_min = a_left + a_width + 3
-    cell_x_max = a_left + a_width + 350
-    cell_y_min = a_top - 20
-    cell_y_max = a_top + a_height + 60
-
-    cell_tokens = data_df[
-        (data_df['left'] >= cell_x_min) &
-        (data_df['left'] <= cell_x_max) &
-        (data_df['top'] >= cell_y_min) &
-        (data_df['top'] <= cell_y_max) &
-        (data_df['conf'] >= 20)  # 저신뢰도 노이즈 제거
+    # 3) 값 셀에서 '앵커와 같은 행'만 후보로 (주소 줄 완전 차단)
+    value_tokens = data_df[
+        (data_df['left'] > label_cell_right + 2) &
+        (data_df['top'] >= a_top - 8) &
+        (data_df['top'] <= a_top + a_height + 8) &
+        (data_df['conf'] >= 15)
     ].copy()
 
-    if cell_tokens.empty:
-        return ""
+    # 4) 영어 라벨 단어 완전 차단
+    noise_re = re.compile(
+        r'(vendor|address|inspected|reviewed|approved|by|order|customer|'
+        r'deliver|item|material|remark|result)',
+        re.IGNORECASE
+    )
+    value_tokens = value_tokens[
+        ~value_tokens['text'].str.contains(noise_re, na=False, regex=True)
+    ]
 
-    # 3) y좌표 클러스터링으로 줄(line) 그룹화
-    #    - top 값 기준으로 8px 이내면 같은 줄로 묶음
-    cell_tokens = cell_tokens.sort_values(by=['top', 'left']).reset_index(drop=True)
-    lines = []
-    current_line = []
-    prev_top = None
+    if value_tokens.empty:
+        m = re.search(
+            r'([가-힣A-Za-z][가-힣A-Za-z0-9]{1,}'
+            r'(?:머티리얼|테크|산업|정밀|소재|전자|화학|시스템|솔루션|상사|공업))',
+            full_text
+        )
+        return m.group(1) if m else ""
 
-    for _, row in cell_tokens.iterrows():
-        if prev_top is None or abs(row['top'] - prev_top) <= 8:
-            current_line.append(row)
-        else:
-            lines.append(current_line)
-            current_line = [row]
-        prev_top = row['top']
-    if current_line:
-        lines.append(current_line)
+    # 5) 같은 행 토큰 좌→우 병합
+    value_tokens = value_tokens.sort_values(by='left')
+    merged = ''.join(value_tokens['text'].str.strip().tolist())
+    merged = re.sub(r'\s+', '', merged)
+    merged = re.sub(r'[^가-힣a-zA-Z0-9()&.\-]', '', merged)
 
-    # 4) 각 줄을 문자열로 병합 + 주소 여부 판정
-    line_texts = []
-    for line in lines:
-        # 같은 줄 내에서 left 기준 정렬 후 병합
-        line_sorted = sorted(line, key=lambda r: r['left'])
-        merged = ''.join(r['text'].strip() for r in line_sorted)
-        merged = re.sub(r'\s+', '', merged)  # 공백 제거
-        # 노이즈 문자 정리
-        merged = re.sub(r'[^가-힣a-zA-Z0-9()&.\-]', '', merged)
-        if merged:
-            line_texts.append({
-                'text': merged,
-                'top': line_sorted[0]['top'],
-                'is_addr': is_address_like(merged),
-                'avg_conf': sum(r['conf'] for r in line_sorted) / len(line_sorted),
-            })
+    # 6) 검증
+    if (len(merged) >= 2
+            and re.search(r'[가-힣a-zA-Z]', merged)
+            and not is_address_like(merged)):
+        return merged
 
-    if not line_texts:
-        return ""
-
-    # 5) 상호명 후보 선정
-    #    (1순위) 주소가 아닌 줄 중 최상단
-    non_addr_lines = [l for l in line_texts if not l['is_addr'] and is_company_like(l['text'])]
-    if non_addr_lines:
-        non_addr_lines.sort(key=lambda x: x['top'])
-        return non_addr_lines[0]['text']
-
-    #    (2순위) 전체 텍스트에서 회사명 패턴 재탐색 (폴백)
-    #    예: "㈜OOO", "OOO(주)", "OO머티리얼", "OO테크" 등
-    company_pattern = re.search(
-        r'([가-힣A-Za-z]{2,}(?:머티리얼|테크|산업|정밀|소재|전자|화학|시스템|솔루션|(?:\(주\)|㈜)))',
+    # 7) 폴백 정규식
+    m = re.search(
+        r'([가-힣A-Za-z][가-힣A-Za-z0-9]{1,}'
+        r'(?:머티리얼|테크|산업|정밀|소재|전자|화학|시스템|솔루션|상사|공업))',
         full_text
     )
-    if company_pattern:
-        return company_pattern.group(1)
-
-    #    (3순위) 주소로 판정되지 않은 첫 줄 반환
-    for l in line_texts:
-        if not l['is_addr'] and len(l['text']) >= 2:
-            return l['text']
-
-    return ""
+    return m.group(1) if m else ""
 
 
 # ============================================================
 # 메인 로직
 # ============================================================
+uploaded_file = st.file_uploader(
+    "파일을 업로드하세요 (PDF, JPG, PNG)",
+    type=["pdf", "png", "jpg", "jpeg"]
+)
+
 if uploaded_file is not None:
     try:
         image = None
@@ -178,16 +142,22 @@ if uploaded_file is not None:
                     image,
                     output_type=pytesseract.Output.DATAFRAME,
                     lang='kor+eng',
-                    config='--psm 6'   # 표 구조에 유리
+                    config='--psm 6'
                 )
-                data_df = data_df[data_df.text.notnull() & (data_df.text.str.strip() != '')]
-                data_df['conf'] = pd.to_numeric(data_df['conf'], errors='coerce').fillna(0)
+                data_df = data_df[
+                    data_df.text.notnull() & (data_df.text.str.strip() != '')
+                ].copy()
+                data_df['conf'] = pd.to_numeric(
+                    data_df['conf'], errors='coerce'
+                ).fillna(0)
 
                 # ---------- 1. 수주번호 ----------
                 order_no = ""
                 order_match = re.search(r'(H[0-9]{6}[A-Za-z0-9\-]+)', full_text)
                 if order_match:
-                    order_no = re.sub(r'[^A-Za-z0-9\-]', '', order_match.group(1).strip())
+                    order_no = re.sub(
+                        r'[^A-Za-z0-9\-]', '', order_match.group(1).strip()
+                    )
                 else:
                     alt = re.search(r'수주번호[^\w]*([A-Za-z0-9\-]+)', full_text)
                     if alt:
@@ -195,7 +165,9 @@ if uploaded_file is not None:
 
                 # ---------- 2. 의뢰일자 ----------
                 date = ""
-                date_matches = re.findall(r'(20[2-9][0-9][-/.][0-9]{2}[-/.][0-9]{2})', full_text)
+                date_matches = re.findall(
+                    r'(20[2-9][0-9][-/.][0-9]{2}[-/.][0-9]{2})', full_text
+                )
                 for m in date_matches:
                     digits = re.sub(r'[^0-9]', '', m)
                     if len(digits) == 8 and digits.startswith('20'):
@@ -209,18 +181,22 @@ if uploaded_file is not None:
                             date = digits
                             break
 
-                # ---------- 3. 업체명 (핵심 수정) ----------
+                # ---------- 3. 업체명 ----------
                 vendor = extract_vendor_name(data_df, full_text)
                 if not vendor or len(vendor) < 2:
                     vendor = "업체명확인필요"
 
                 # ---------- 4. 발주서번호 ----------
                 po_no = ""
-                po_match = re.search(r'(PO?[0-9]{8,})', full_text, re.IGNORECASE)
+                po_match = re.search(
+                    r'(PO?[0-9]{8,})', full_text, re.IGNORECASE
+                )
                 if po_match:
                     po_no = po_match.group(1).strip()
                 else:
-                    alt_po = re.search(r'발주서[^\w]*번호[^\w]*([A-Za-z0-9]+)', full_text)
+                    alt_po = re.search(
+                        r'발주서[^\w]*번호[^\w]*([A-Za-z0-9]+)', full_text
+                    )
                     if alt_po:
                         po_no = alt_po.group(1).strip()
 
@@ -243,11 +219,12 @@ if uploaded_file is not None:
 
             st.info("💡 위 파일명을 복사해서 사내 파일명 변경에 사용하세요!")
 
-            # ---------- 디버깅용 (개발 중에만 True) ----------
+            # ---------- 디버깅용 (필요할 때만 체크) ----------
             if st.checkbox("🔍 OCR 좌표 디버깅 보기"):
                 st.dataframe(
                     data_df[['text', 'left', 'top', 'width', 'height', 'conf']]
                     .sort_values(by=['top', 'left'])
+                    .reset_index(drop=True)
                 )
 
     except Exception as e:
