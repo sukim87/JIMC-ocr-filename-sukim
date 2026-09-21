@@ -89,33 +89,35 @@ if uploaded_file is not None:
                             date = digits
                             break
 
-                # 3. 업체명 추출 (우측 칸 안에서 세로 좌표가 가장 높은 '최상단 첫 번째 줄'만 정밀 타겟팅)
+                # 3. 업체명 추출 ('업체소재지' 우측 칸 안에서 최상단 첫 번째 줄만 정밀 추출)
                 vendor = ""
                 vendor_label = data_df[data_df['text'].str.contains('업체소재지|Vendor', na=False)]
                 if not vendor_label.empty:
-                    v_row = vendor_label.sort_values(by='top').iloc[0]
-                    v_top, v_left, v_width = v_row['top'], v_row['left'], v_row['width']
+                    v_row = vendor_label.iloc[0]
+                    v_top, v_left = v_row['top'], v_row['left']
                     
-                    # '업체소재지' 레이블 우측 영역에 있는 텍스트들 수집
-                    right_cell_left = v_left + v_width - 10
+                    # '업체소재지' 우측 영역의 토큰들 중 상단 부근만 타겟팅
                     right_tokens = data_df[
-                        (data_df['left'] >= right_cell_left) &
-                        (data_df['top'] >= v_top - 20) &
-                        (data_df['top'] <= v_top + 35)
+                        (data_df['left'] >= v_left + 30) & 
+                        (data_df['top'] >= v_top - 15) & 
+                        (data_df['top'] <= v_top + 30)
                     ].sort_values(by=['top', 'left'])
                     
                     if not right_tokens.empty:
-                        # 그중 가장 위에 있는 줄(가장 작은 top 값)을 가진 토큰 그룹만 추출
+                        # 가장 위에 있는 줄(최소 top 값)을 가진 토큰들만 골라냄
                         min_top = right_tokens['top'].min()
-                        top_line_tokens = right_tokens[
-                            (right_tokens['top'] >= min_top - 6) &
+                        top_line = right_tokens[
+                            (right_tokens['top'] >= min_top - 5) & 
                             (right_tokens['top'] <= min_top + 6)
                         ].sort_values(by='left')
                         
                         extracted_words = []
-                        for _, r in top_line_tokens.iterrows():
+                        for _, r in top_line.iterrows():
                             w = r['text'].strip()
                             if any(k in w.lower() for k in ['vendor', 'address', '업체소재지']):
+                                continue
+                            # 주소 관련 단어나 행정구역 키워드가 포함되면 상호명에서 제외
+                            if any(addr_k in w for addr_k in ['로', '길', '동', '호', '부산', '창원', '시', '구']):
                                 continue
                             clean_w = re.sub(r'[^가-힣a-zA-Z0-9]', '', w)
                             if len(clean_w) > 0:
