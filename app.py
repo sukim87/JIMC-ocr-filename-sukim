@@ -1,9 +1,12 @@
 import streamlit as st
 import pytesseract
+from pytesseract import Output
 from PIL import Image, ImageOps, ImageEnhance, ImageFilter
 import re
 import os
 import io
+from difflib import SequenceMatcher
+
 
 # ============================================================
 # 기본 설정
@@ -19,210 +22,14 @@ st.set_page_config(
 
 st.title("📄 인수검사서 파일명 자동 생성기")
 st.write(
-    "스캔된 PDF 또는 이미지에서 수주번호, 의뢰일자, 업체명, 발주서번호를 추출합니다."
+    "스캔된 PDF 또는 이미지에서 수주번호, 의뢰일자, 업체명, 발주서번호를 자동 추출합니다."
 )
 
 st.markdown("---")
 
 
 # ============================================================
-# OCR 전처리
-# ============================================================
-
-def preprocess_image(image, scale=3, threshold=False):
-    """
-    OCR 인식률을 높이기 위한 이미지 전처리
-    """
-
-    image = image.convert("L")
-
-    # 확대
-    w, h = image.size
-    image = image.resize(
-        (w * scale, h * scale),
-        Image.Resampling.LANCZOS
-    )
-
-    # 대비 향상
-    image = ImageOps.autocontrast(image)
-
-    # 선명하게
-    image = image.filter(ImageFilter.SHARPEN)
-
-    image = ImageEnhance.Contrast(image).enhance(1.5)
-
-    # 필요할 경우 흑백화
-    if threshold:
-        image = image.point(
-            lambda p: 255 if p > 170 else 0
-        )
-
-    return image
-
-
-# ============================================================
-# OCR 실행
-# ============================================================
-
-def run_ocr(image, lang="kor+eng", psm=6, whitelist=None):
-    """
-    여러 조건에서 OCR 실행
-    """
-
-    config = f"--oem 3 --psm {psm}"
-
-    if whitelist:
-        config += f" -c tessedit_char_whitelist={whitelist}"
-
-    try:
-        return pytesseract.image_to_string(
-            image,
-            lang=lang,
-            config=config
-        )
-    except Exception:
-        return ""
-
-
-# ============================================================
-# 문자열 정리
-# ============================================================
-
-def clean_text(text):
-    if not text:
-        return ""
-
-    text = text.replace("\x0c", " ")
-    text = text.replace("\n", " ")
-    text = re.sub(r"\s+", " ", text)
-
-    return text.strip()
-
-
-# ============================================================
-# 수주번호 정리
-# 예:
-# H250208UD-1
-# H260620UE
-# ============================================================
-
-def normalize_order_no(text):
-
-    if not text:
-        return ""
-
-    text = text.upper()
-    text = text.replace(" ", "")
-    text = text.replace("_", "-")
-
-    # OCR에서 자주 발생하는 혼동
-    text = text.replace("—", "-")
-    text = text.replace("–", "-")
-
-    # H + 6자리 + 영문2자리 + 선택적 -숫자
-    match = re.search(
-        r"H\d{6}[A-Z]{2}(?:-\d+)?",
-        text
-    )
-
-    if match:
-        return match.group(0)
-
-    # 혹시 숫자/문자가 붙어 있는 경우
-    match = re.search(
-        r"H\d{6}[A-Z0-9\-]{2,}",
-        text
-    )
-
-    if match:
-        return match.group(0)
-
-    return ""
-
-
-# ============================================================
-# 날짜 정리
-# ============================================================
-
-def normalize_date(text):
-
-    if not text:
-        return ""
-
-    # OCR에서 흔한 문자 제거
-    text = text.replace(" ", "")
-
-    # 2025-04-16
-    match = re.search(
-        r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})",
-        text
-    )
-
-    if match:
-        yyyy = match.group(1)
-        mm = match.group(2).zfill(2)
-        dd = match.group(3).zfill(2)
-
-        return f"{yyyy}{mm}{dd}"
-
-    # 2025 04 16
-    match = re.search(
-        r"(20\d{2})(\d{2})(\d{2})",
-        text
-    )
-
-    if match:
-        return "".join(match.groups())
-
-    return ""
-
-
-# ============================================================
-# PO 번호 정리
-# 예:
-# P02504050001
-# ============================================================
-
-def normalize_po_no(text):
-
-    if not text:
-        return ""
-
-    text = text.upper()
-    text = text.replace(" ", "")
-    text = text.replace("-", "")
-
-    # PO가 OCR에서 P0로 읽히는 경우
-    # 실제 양식은 P + 숫자 형태이므로 P로 시작하는 숫자 검색
-    match = re.search(
-        r"P\d{8,}",
-        text
-    )
-
-    if match:
-        return match.group(0)
-
-    # OCR이 PO라고 읽은 경우
-    match = re.search(
-        r"PO\d{8,}",
-        text
-    )
-
-    if match:
-        value = match.group(0)
-
-        # 이 양식의 PO 번호가 P + 숫자라면
-        # PO가 아니라 P로 정리
-        if len(value) > 2:
-            return "P" + value[2:]
-
-        return value
-
-    return ""
-
-
-# ============================================================
-# 업체명 정리
+# 알려진 업체명
 # ============================================================
 
 KNOWN_VENDORS = [
@@ -233,40 +40,675 @@ KNOWN_VENDORS = [
 ]
 
 
+# ============================================================
+# 이미지 전처리
+# ============================================================
+
+def make_ocr_images(image):
+    """
+    스캔본 상태가 제각각이므로 여러 방식으로 OCR용 이미지를 만든다.
+    좌표는 사용하지 않는다.
+    """
+
+    original = image.convert("RGB")
+
+    gray = ImageOps.grayscale(original)
+
+    # 2.5배 확대
+    w, h = gray.size
+    enlarged = gray.resize(
+        (int(w * 2.5), int(h * 2.5)),
+        Image.Resampling.LANCZOS
+    )
+
+    # 대비 강화
+    contrast = ImageEnhance.Contrast(enlarged).enhance(1.8)
+
+    # 선명도 강화
+    sharp = contrast.filter(ImageFilter.SHARPEN)
+
+    # 흑백화
+    threshold = sharp.point(
+        lambda p: 255 if p > 175 else 0
+    )
+
+    return [
+        original,
+        enlarged,
+        sharp,
+        threshold
+    ]
+
+
+# ============================================================
+# OCR 데이터 읽기
+# ============================================================
+
+def get_ocr_data(image, psm=6):
+
+    config = f"--oem 3 --psm {psm}"
+
+    try:
+        data = pytesseract.image_to_data(
+            image,
+            lang="kor+eng",
+            config=config,
+            output_type=Output.DICT
+        )
+
+        words = []
+
+        count = len(data["text"])
+
+        for i in range(count):
+
+            text = data["text"][i].strip()
+
+            if not text:
+                continue
+
+            try:
+                conf = float(data["conf"][i])
+            except:
+                conf = 0
+
+            if conf < 5:
+                continue
+
+            words.append({
+                "text": text,
+                "conf": conf,
+                "left": int(data["left"][i]),
+                "top": int(data["top"][i]),
+                "width": int(data["width"][i]),
+                "height": int(data["height"][i]),
+                "right": int(data["left"][i]) + int(data["width"][i]),
+                "bottom": int(data["top"][i]) + int(data["height"][i]),
+                "block": data["block_num"][i],
+                "par": data["par_num"][i],
+                "line": data["line_num"][i],
+            })
+
+        return words
+
+    except Exception:
+        return []
+
+
+# ============================================================
+# OCR 전체 텍스트
+# ============================================================
+
+def get_ocr_text(image):
+
+    try:
+        return pytesseract.image_to_string(
+            image,
+            lang="kor+eng",
+            config="--oem 3 --psm 6"
+        )
+    except:
+        return ""
+
+
+# ============================================================
+# OCR 단어들을 줄 단위로 묶기
+# ============================================================
+
+def group_words_into_lines(words):
+
+    lines = {}
+
+    for word in words:
+
+        key = (
+            word["block"],
+            word["par"],
+            word["line"]
+        )
+
+        if key not in lines:
+            lines[key] = []
+
+        lines[key].append(word)
+
+    result = []
+
+    for key, line_words in lines.items():
+
+        line_words.sort(
+            key=lambda x: x["left"]
+        )
+
+        text = " ".join(
+            w["text"]
+            for w in line_words
+        )
+
+        result.append({
+            "words": line_words,
+            "text": text,
+            "top": min(w["top"] for w in line_words),
+            "bottom": max(w["bottom"] for w in line_words),
+            "left": min(w["left"] for w in line_words),
+            "right": max(w["right"] for w in line_words),
+        })
+
+    result.sort(
+        key=lambda x: (x["top"], x["left"])
+    )
+
+    return result
+
+
+# ============================================================
+# 문자열 정규화
+# ============================================================
+
+def compact_text(text):
+
+    if not text:
+        return ""
+
+    text = text.upper()
+
+    text = text.replace(" ", "")
+    text = text.replace("\n", "")
+    text = text.replace("\t", "")
+
+    return text
+
+
+# ============================================================
+# OCR 라벨 유사도
+# ============================================================
+
+def similarity(a, b):
+
+    a = compact_text(a)
+    b = compact_text(b)
+
+    if not a or not b:
+        return 0
+
+    if a in b or b in a:
+        return 1.0
+
+    return SequenceMatcher(
+        None,
+        a,
+        b
+    ).ratio()
+
+
+# ============================================================
+# 라벨을 찾는다
+# ============================================================
+
+def find_label(words, labels):
+
+    """
+    OCR 결과에서 지정한 라벨을 찾는다.
+
+    예:
+    Issue Date
+    의뢰일자
+    Order No
+    수주번호
+    PO No
+    업체소재지
+    Vendor Address
+    """
+
+    candidates = []
+
+    # --------------------------------------------------------
+    # 개별 단어 검색
+    # --------------------------------------------------------
+
+    for word in words:
+
+        for label in labels:
+
+            score = similarity(
+                word["text"],
+                label
+            )
+
+            if score >= 0.72:
+
+                candidates.append({
+                    "word": word,
+                    "score": score
+                })
+
+
+    # --------------------------------------------------------
+    # 연속된 2~4개 단어 조합 검색
+    # 예:
+    # Vendor + Address
+    # Issue + Date
+    # Order + No
+    # --------------------------------------------------------
+
+    sorted_words = sorted(
+        words,
+        key=lambda x: (x["top"], x["left"])
+    )
+
+    for i in range(len(sorted_words)):
+
+        for n in range(2, 5):
+
+            if i + n > len(sorted_words):
+                continue
+
+            group = sorted_words[i:i+n]
+
+            # 같은 줄에 있는 단어만
+            if len({
+                (
+                    x["block"],
+                    x["par"],
+                    x["line"]
+                )
+                for x in group
+            }) != 1:
+                continue
+
+            combined = "".join(
+                x["text"]
+                for x in group
+            )
+
+            combined_space = " ".join(
+                x["text"]
+                for x in group
+            )
+
+            for label in labels:
+
+                score1 = similarity(
+                    combined,
+                    label
+                )
+
+                score2 = similarity(
+                    combined_space,
+                    label
+                )
+
+                score = max(
+                    score1,
+                    score2
+                )
+
+                if score >= 0.72:
+
+                    candidates.append({
+                        "word": {
+                            "text": combined,
+                            "left": min(
+                                x["left"]
+                                for x in group
+                            ),
+                            "right": max(
+                                x["right"]
+                                for x in group
+                            ),
+                            "top": min(
+                                x["top"]
+                                for x in group
+                            ),
+                            "bottom": max(
+                                x["bottom"]
+                                for x in group
+                            ),
+                            "height": max(
+                                x["height"]
+                                for x in group
+                            ),
+                            "block": group[0]["block"],
+                            "par": group[0]["par"],
+                            "line": group[0]["line"],
+                        },
+                        "score": score
+                    })
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda x: x["score"],
+        reverse=True
+    )
+
+    return candidates[0]["word"]
+
+
+# ============================================================
+# 라벨 주변의 단어 찾기
+# ============================================================
+
+def words_near_label(
+    words,
+    label,
+    max_vertical_lines=2
+):
+
+    if not label:
+        return []
+
+    label_center_y = (
+        label["top"] +
+        label["bottom"]
+    ) / 2
+
+    label_height = max(
+        label.get("height", 20),
+        10
+    )
+
+    nearby = []
+
+    for word in words:
+
+        # 자기 자신은 제외
+        if (
+            word["left"] == label["left"]
+            and
+            word["top"] == label["top"]
+        ):
+            continue
+
+        word_center_y = (
+            word["top"] +
+            word["bottom"]
+        ) / 2
+
+        vertical_distance = abs(
+            word_center_y -
+            label_center_y
+        )
+
+        # 같은 행 또는 인접 행
+        if vertical_distance <= label_height * 2.8:
+
+            nearby.append(word)
+
+    # 왼쪽 → 오른쪽
+    nearby.sort(
+        key=lambda x: (
+            abs(
+                (
+                    x["top"] +
+                    x["bottom"]
+                ) / 2
+                -
+                label_center_y
+            ),
+            x["left"]
+        )
+    )
+
+    return nearby
+
+
+# ============================================================
+# 라벨 오른쪽 후보
+# ============================================================
+
+def right_side_candidates(
+    words,
+    label
+):
+
+    nearby = words_near_label(
+        words,
+        label
+    )
+
+    result = []
+
+    label_right = label["right"]
+
+    label_center_y = (
+        label["top"] +
+        label["bottom"]
+    ) / 2
+
+    for word in nearby:
+
+        center_y = (
+            word["top"] +
+            word["bottom"]
+        ) / 2
+
+        # 라벨 오른쪽
+        if word["left"] >= label_right - 5:
+
+            vertical_distance = abs(
+                center_y -
+                label_center_y
+            )
+
+            result.append({
+                "word": word,
+                "distance": vertical_distance
+            })
+
+    result.sort(
+        key=lambda x: (
+            x["distance"],
+            x["word"]["left"]
+        )
+    )
+
+    return [
+        x["word"]
+        for x in result
+    ]
+
+
+# ============================================================
+# 날짜 추출
+# ============================================================
+
+def normalize_date(text):
+
+    if not text:
+        return ""
+
+    text = text.upper()
+
+    # OCR 오인식 보정
+    text = text.replace("O", "0")
+    text = text.replace("I", "1")
+    text = text.replace("L", "1")
+
+    patterns = [
+
+        # 2025-04-16
+        r"(20\d{2})\s*[-./]\s*(\d{1,2})\s*[-./]\s*(\d{1,2})",
+
+        # 2025 04 16
+        r"(20\d{2})\s+(\d{2})\s+(\d{2})",
+
+        # 20250416
+        r"(20\d{2})(\d{2})(\d{2})",
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            text
+        )
+
+        if match:
+
+            yyyy = match.group(1)
+            mm = match.group(2).zfill(2)
+            dd = match.group(3).zfill(2)
+
+            if 1 <= int(mm) <= 12 and 1 <= int(dd) <= 31:
+
+                return (
+                    f"{yyyy}"
+                    f"{mm}"
+                    f"{dd}"
+                )
+
+    return ""
+
+
+# ============================================================
+# 수주번호 추출
+# ============================================================
+
+def normalize_order(text):
+
+    if not text:
+        return ""
+
+    text = text.upper()
+
+    # 공백 제거
+    text = re.sub(
+        r"\s+",
+        "",
+        text
+    )
+
+    # OCR 문자 보정
+    text = text.replace("—", "-")
+    text = text.replace("–", "-")
+    text = text.replace("_", "-")
+
+    patterns = [
+
+        # H250208UD-1
+        r"H\d{6}[A-Z]{2}-\d+",
+
+        # H260620UE
+        r"H\d{6}[A-Z]{2}",
+
+        # 조금 느슨한 형태
+        r"H\d{6}[A-Z0-9\-]{2,}",
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            text
+        )
+
+        if match:
+            return match.group(0)
+
+    return ""
+
+
+# ============================================================
+# PO 번호 추출
+# ============================================================
+
+def normalize_po(text):
+
+    if not text:
+        return ""
+
+    text = text.upper()
+
+    text = re.sub(
+        r"\s+",
+        "",
+        text
+    )
+
+    # PO가 P0로 인식되는 경우를 고려
+    patterns = [
+
+        r"PO\d{8,}",
+
+        r"P\d{8,}",
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            text
+        )
+
+        if match:
+
+            value = match.group(0)
+
+            # P02504050001 같은 실제 P+숫자 형식
+            if re.fullmatch(
+                r"P\d{8,}",
+                value
+            ):
+                return value
+
+            # PO02504050001 → P02504050001
+            if value.startswith("PO"):
+
+                return (
+                    "P" +
+                    value[2:]
+                )
+
+    return ""
+
+
+# ============================================================
+# 업체명 추출
+# ============================================================
+
 def normalize_vendor(text):
 
     if not text:
         return ""
 
-    text = clean_text(text)
+    compact = compact_text(text)
 
-    # 괄호/주소 제거
+    # --------------------------------------------------------
+    # 1순위: 알려진 업체명
+    # --------------------------------------------------------
+
+    for vendor in KNOWN_VENDORS:
+
+        if compact.find(
+            compact_text(vendor)
+        ) >= 0:
+
+            return vendor
+
+
+    # --------------------------------------------------------
+    # 2순위: 일반적인 한글 업체명
+    # --------------------------------------------------------
+
     text = re.sub(
         r"\(.*?\)",
-        "",
+        " ",
         text
     )
 
-    # 먼저 등록된 업체명과 정확/부분 매칭
-    for company in KNOWN_VENDORS:
-
-        if company in text:
-            return company
-
-        # OCR 공백 때문에 분리된 경우
-        compact = text.replace(" ", "")
-
-        if company in compact:
-            return company
-
-    # 한글 업체명 추출
-    korean_matches = re.findall(
+    candidates = re.findall(
         r"[가-힣]{2,}",
         text
     )
 
-    # 주소 단어 제거
-    address_words = [
+    exclude = {
+
+        "업체",
+        "소재지",
+        "업체소재지",
+        "주소",
         "경상남도",
         "경상북도",
         "경기도",
@@ -284,249 +726,198 @@ def normalize_vendor(text):
         "울산",
         "세종",
         "창원시",
-        "천안시",
         "김해시",
-        "주소",
-        "업체소재지",
-        "업체",
-        "소재지",
-    ]
+        "천안시",
+        "부산광역시",
+        "경상남도창원시",
+    }
 
-    for word in korean_matches:
+    for candidate in candidates:
 
-        if word in address_words:
-            continue
+        if candidate not in exclude:
 
-        if len(word) >= 2:
-            return word
+            if len(candidate) >= 2:
+
+                return candidate
 
     return ""
 
 
 # ============================================================
-# 실제 양식의 지정 영역 OCR
+# 라벨 기반 필드 추출
 # ============================================================
 
-def crop_ratio(image, x1, y1, x2, y2):
-    """
-    이미지 크기에 관계없이 비율로 영역을 잘라냄
-    """
-
-    w, h = image.size
-
-    return image.crop(
-        (
-            int(w * x1),
-            int(h * y1),
-            int(w * x2),
-            int(h * y2)
-        )
-    )
-
-
-def extract_from_fixed_regions(image):
+def extract_by_labels(words):
 
     result = {
         "order_no": "",
         "date": "",
         "vendor": "",
-        "po_no": ""
+        "po_no": "",
     }
-
-    # --------------------------------------------------------
-    # 현재 올려주신 실제 양식 기준 위치
-    #
-    # 업체명:
-    # 상단 Vendor Address 오른쪽
-    #
-    # 의뢰일자:
-    # Issue Date 오른쪽
-    #
-    # 수주번호:
-    # Order No 오른쪽
-    #
-    # PO:
-    # PO No 오른쪽
-    # --------------------------------------------------------
-
-    regions = {
-
-        # 업체명
-        "vendor": crop_ratio(
-            image,
-            0.335, 0.025,
-            0.475, 0.095
-        ),
-
-        # 수주번호
-        "order_no": crop_ratio(
-            image,
-            0.335, 0.145,
-            0.475, 0.215
-        ),
-
-        # 의뢰일자
-        "date": crop_ratio(
-            image,
-            0.225, 0.195,
-            0.355, 0.255
-        ),
-
-        # PO 번호
-        "po_no": crop_ratio(
-            image,
-            0.775, 0.195,
-            0.915, 0.255
-        )
-    }
-
-    # --------------------------------------------------------
-    # 업체명 OCR
-    # --------------------------------------------------------
-
-    vendor_img = preprocess_image(
-        regions["vendor"],
-        scale=4,
-        threshold=False
-    )
-
-    vendor_text_1 = run_ocr(
-        vendor_img,
-        lang="kor+eng",
-        psm=7
-    )
-
-    vendor_img_bw = preprocess_image(
-        regions["vendor"],
-        scale=4,
-        threshold=True
-    )
-
-    vendor_text_2 = run_ocr(
-        vendor_img_bw,
-        lang="kor+eng",
-        psm=7
-    )
-
-    vendor_text = vendor_text_1 + " " + vendor_text_2
-
-    result["vendor"] = normalize_vendor(vendor_text)
-
-    # --------------------------------------------------------
-    # 수주번호 OCR
-    # --------------------------------------------------------
-
-    order_img = preprocess_image(
-        regions["order_no"],
-        scale=4,
-        threshold=False
-    )
-
-    order_text = run_ocr(
-        order_img,
-        lang="eng",
-        psm=7,
-        whitelist="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-"
-    )
-
-    result["order_no"] = normalize_order_no(order_text)
-
-    # --------------------------------------------------------
-    # 날짜 OCR
-    # --------------------------------------------------------
-
-    date_img = preprocess_image(
-        regions["date"],
-        scale=4,
-        threshold=False
-    )
-
-    date_text = run_ocr(
-        date_img,
-        lang="eng",
-        psm=7,
-        whitelist="0123456789-./"
-    )
-
-    result["date"] = normalize_date(date_text)
-
-    # --------------------------------------------------------
-    # PO 번호 OCR
-    # --------------------------------------------------------
-
-    po_img = preprocess_image(
-        regions["po_no"],
-        scale=4,
-        threshold=False
-    )
-
-    po_text = run_ocr(
-        po_img,
-        lang="eng",
-        psm=7,
-        whitelist="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-    )
-
-    result["po_no"] = normalize_po_no(po_text)
-
-    return result, regions
-
-
-# ============================================================
-# 전체 페이지 OCR
-# 지정 영역 OCR이 실패했을 경우 보완
-# ============================================================
-
-def extract_from_full_ocr(image):
-
-    result = {
-        "order_no": "",
-        "date": "",
-        "vendor": "",
-        "po_no": ""
-    }
-
-    processed = preprocess_image(
-        image,
-        scale=2,
-        threshold=False
-    )
-
-    text1 = run_ocr(
-        processed,
-        lang="kor+eng",
-        psm=6
-    )
-
-    processed_bw = preprocess_image(
-        image,
-        scale=2,
-        threshold=True
-    )
-
-    text2 = run_ocr(
-        processed_bw,
-        lang="kor+eng",
-        psm=6
-    )
-
-    text = text1 + "\n" + text2
 
     # --------------------------------------------------------
     # 수주번호
     # --------------------------------------------------------
 
-    result["order_no"] = normalize_order_no(text)
+    order_label = find_label(
+        words,
+        [
+            "수주번호",
+            "Order No",
+            "OrderNo",
+            "Order"
+        ]
+    )
+
+    if order_label:
+
+        candidates = right_side_candidates(
+            words,
+            order_label
+        )
+
+        # 가까운 단어들을 조합
+        candidate_text = " ".join(
+            w["text"]
+            for w in candidates[:8]
+        )
+
+        result["order_no"] = normalize_order(
+            candidate_text
+        )
+
+
+    # --------------------------------------------------------
+    # 의뢰일자
+    # --------------------------------------------------------
+
+    date_label = find_label(
+        words,
+        [
+            "의뢰일자",
+            "Issue Date",
+            "IssueDate"
+        ]
+    )
+
+    if date_label:
+
+        candidates = right_side_candidates(
+            words,
+            date_label
+        )
+
+        candidate_text = " ".join(
+            w["text"]
+            for w in candidates[:10]
+        )
+
+        result["date"] = normalize_date(
+            candidate_text
+        )
+
+
+    # --------------------------------------------------------
+    # 발주서번호
+    # --------------------------------------------------------
+
+    po_label = find_label(
+        words,
+        [
+            "발주서번호",
+            "발주서 번호",
+            "PO No",
+            "PONo",
+            "PO"
+        ]
+    )
+
+    if po_label:
+
+        candidates = right_side_candidates(
+            words,
+            po_label
+        )
+
+        candidate_text = " ".join(
+            w["text"]
+            for w in candidates[:10]
+        )
+
+        result["po_no"] = normalize_po(
+            candidate_text
+        )
+
+
+    # --------------------------------------------------------
+    # 업체명
+    # --------------------------------------------------------
+
+    vendor_label = find_label(
+        words,
+        [
+            "업체소재지",
+            "업체 소재지",
+            "Vendor Address",
+            "VendorAddress"
+        ]
+    )
+
+    if vendor_label:
+
+        candidates = right_side_candidates(
+            words,
+            vendor_label
+        )
+
+        candidate_text = " ".join(
+            w["text"]
+            for w in candidates[:12]
+        )
+
+        result["vendor"] = normalize_vendor(
+            candidate_text
+        )
+
+
+    return result
+
+
+# ============================================================
+# 전체 OCR 텍스트 기반 보완
+# ============================================================
+
+def extract_by_regex(text):
+
+    result = {
+        "order_no": "",
+        "date": "",
+        "vendor": "",
+        "po_no": "",
+    }
+
+    if not text:
+        return result
+
+
+    # --------------------------------------------------------
+    # 수주번호
+    # --------------------------------------------------------
+
+    result["order_no"] = normalize_order(
+        text
+    )
+
 
     # --------------------------------------------------------
     # 날짜
     # --------------------------------------------------------
 
-    # Issue Date / 의뢰일자 주변
     date_patterns = [
-        r"Issue\s*Date.{0,100}?(20\d{2}[-/.]\d{1,2}[-/.]\d{1,2})",
-        r"의뢰일자.{0,100}?(20\d{2}[-/.]\d{1,2}[-/.]\d{1,2})",
-        r"(20\d{2}[-/.]\d{1,2}[-/.]\d{1,2})",
+
+        r"Issue\s*Date.{0,100}",
+        r"의뢰일자.{0,100}",
     ]
 
     for pattern in date_patterns:
@@ -534,63 +925,96 @@ def extract_from_full_ocr(image):
         match = re.search(
             pattern,
             text,
-            re.IGNORECASE | re.DOTALL
+            re.IGNORECASE |
+            re.DOTALL
         )
 
         if match:
-            result["date"] = normalize_date(
-                match.group(1)
+
+            value = normalize_date(
+                match.group(0)
             )
-            break
 
-    # --------------------------------------------------------
-    # 업체명
-    # --------------------------------------------------------
+            if value:
 
-    result["vendor"] = normalize_vendor(text)
+                result["date"] = value
+                break
+
+
+    if not result["date"]:
+
+        result["date"] = normalize_date(
+            text
+        )
+
 
     # --------------------------------------------------------
     # PO
     # --------------------------------------------------------
 
-    po_patterns = [
-        r"PO\s*No\.?.{0,80}?([Pp]?\d{8,})",
-        r"발주서\s*번호.{0,80}?([Pp]?\d{8,})",
-        r"\b(P\d{8,})\b",
-    ]
+    result["po_no"] = normalize_po(
+        text
+    )
 
-    for pattern in po_patterns:
 
-        match = re.search(
-            pattern,
-            text,
-            re.IGNORECASE | re.DOTALL
-        )
+    # --------------------------------------------------------
+    # 업체명
+    # --------------------------------------------------------
 
-        if match:
-            result["po_no"] = normalize_po_no(
-                match.group(1)
-            )
-            break
+    result["vendor"] = normalize_vendor(
+        text
+    )
 
-    return result, text
+
+    return result
 
 
 # ============================================================
-# PDF → 이미지
+# 결과 합치기
 # ============================================================
 
-def pdf_to_images(pdf_bytes):
+def merge_results(results):
+
+    final = {
+        "order_no": "",
+        "date": "",
+        "vendor": "",
+        "po_no": "",
+    }
+
+    # 우선순위:
+    # 라벨 기반 → 전체 OCR
+    for result in results:
+
+        for key in final:
+
+            if not final[key]:
+
+                value = result.get(
+                    key,
+                    ""
+                )
+
+                if value:
+
+                    final[key] = value
+
+    return final
+
+
+# ============================================================
+# PDF 처리
+# ============================================================
+
+def convert_pdf(pdf_bytes):
 
     from pdf2image import convert_from_bytes
 
-    images = convert_from_bytes(
+    return convert_from_bytes(
         pdf_bytes,
         dpi=300,
         fmt="png"
     )
-
-    return images
 
 
 # ============================================================
@@ -599,7 +1023,12 @@ def pdf_to_images(pdf_bytes):
 
 uploaded_file = st.file_uploader(
     "파일을 업로드하세요 (PDF, JPG, PNG)",
-    type=["pdf", "png", "jpg", "jpeg"]
+    type=[
+        "pdf",
+        "png",
+        "jpg",
+        "jpeg"
+    ]
 )
 
 
@@ -608,31 +1037,41 @@ if uploaded_file is not None:
     try:
 
         # ====================================================
-        # PDF 처리
+        # PDF
         # ====================================================
 
         if uploaded_file.type == "application/pdf":
 
             pdf_bytes = uploaded_file.read()
 
-            with st.spinner("PDF를 이미지로 변환하는 중입니다..."):
-                images = pdf_to_images(pdf_bytes)
+            with st.spinner(
+                "PDF를 고해상도 이미지로 변환하는 중입니다..."
+            ):
 
-            if not images:
-                st.error("PDF에서 이미지를 불러오지 못했습니다.")
+                pages = convert_pdf(
+                    pdf_bytes
+                )
+
+            if not pages:
+
+                st.error(
+                    "PDF 페이지를 읽지 못했습니다."
+                )
+
                 st.stop()
 
-            # 현재 양식은 1페이지 기준
-            image = images[0]
+            # 첫 페이지
+            image = pages[0]
 
-            if len(images) > 1:
+            if len(pages) > 1:
+
                 st.info(
-                    f"총 {len(images)}페이지가 확인되었습니다. "
-                    "현재는 첫 번째 페이지를 기준으로 분석합니다."
+                    f"총 {len(pages)}페이지입니다. "
+                    "현재는 첫 번째 페이지에서 필요한 정보를 찾습니다."
                 )
 
         # ====================================================
-        # 이미지 처리
+        # 이미지
         # ====================================================
 
         else:
@@ -648,119 +1087,156 @@ if uploaded_file is not None:
 
         st.image(
             image,
-            caption="업로드된 문서 미리보기",
+            caption="업로드된 문서",
             use_container_width=True
         )
 
 
         # ====================================================
-        # OCR 분석
+        # OCR 이미지 생성
         # ====================================================
 
         with st.spinner(
-            "문서를 정밀 분석 중입니다..."
+            "스캔본을 여러 방식으로 OCR 분석 중입니다..."
         ):
 
-            # 1차: 실제 양식의 고정 영역 OCR
-            fixed_result, regions = extract_from_fixed_regions(
+            ocr_images = make_ocr_images(
                 image
             )
 
-            # 2차: 전체 OCR
-            full_result, full_text = extract_from_full_ocr(
-                image
-            )
 
-            # =================================================
-            # 결과 합치기
-            #
-            # 고정영역 OCR 결과를 우선
-            # 실패한 항목만 전체 OCR 결과 사용
-            # =================================================
-
-            order_no = (
-                fixed_result["order_no"]
-                or full_result["order_no"]
-            )
-
-            date = (
-                fixed_result["date"]
-                or full_result["date"]
-            )
-
-            vendor = (
-                fixed_result["vendor"]
-                or full_result["vendor"]
-            )
-
-            po_no = (
-                fixed_result["po_no"]
-                or full_result["po_no"]
-            )
+        all_results = []
+        all_words = []
+        all_texts = []
 
 
         # ====================================================
-        # 샘플 양식에서 업체명이 OCR 실패할 경우
-        # 전체 OCR에 회사명이 존재하는지 한번 더 확인
+        # 여러 전처리 이미지 OCR
         # ====================================================
 
-        if not vendor:
+        for index, ocr_image in enumerate(
+            ocr_images
+        ):
 
-            for company in KNOWN_VENDORS:
+            # OCR 단어 + 위치
+            words = get_ocr_data(
+                ocr_image,
+                psm=6
+            )
 
-                if company in full_text:
+            if words:
 
-                    vendor = company
+                all_words.extend(
+                    words
+                )
+
+                label_result = extract_by_labels(
+                    words
+                )
+
+                all_results.append(
+                    label_result
+                )
+
+
+            # 전체 텍스트
+            text = get_ocr_text(
+                ocr_image
+            )
+
+            if text:
+
+                all_texts.append(
+                    text
+                )
+
+                regex_result = extract_by_regex(
+                    text
+                )
+
+                all_results.append(
+                    regex_result
+                )
+
+
+        # ====================================================
+        # 전체 OCR 텍스트 하나로 합치기
+        # ====================================================
+
+        full_text = "\n".join(
+            all_texts
+        )
+
+
+        # ====================================================
+        # 결과 합치기
+        # ====================================================
+
+        result = merge_results(
+            all_results
+        )
+
+
+        # ====================================================
+        # 알려진 업체명 최종 확인
+        # ====================================================
+
+        if not result["vendor"]:
+
+            for vendor in KNOWN_VENDORS:
+
+                if vendor in full_text:
+
+                    result["vendor"] = vendor
+
                     break
 
 
         # ====================================================
-        # 분석 완료
+        # 결과 표시
         # ====================================================
 
-        st.success("분석 완료!")
-
-
-        # ====================================================
-        # 추출 결과
-        # ====================================================
+        st.success(
+            "분석 완료!"
+        )
 
         st.markdown(
             "### 📊 추출된 항목 확인 및 수정"
         )
 
+
         col1, col2 = st.columns(2)
+
 
         with col1:
 
             final_order = st.text_input(
                 "수주번호",
-                value=order_no
+                value=result["order_no"]
             )
 
             final_date = st.text_input(
                 "의뢰일자",
-                value=date,
+                value=result["date"],
                 placeholder="예: 20250416"
             )
+
 
         with col2:
 
             final_vendor = st.text_input(
                 "업체명",
-                value=vendor,
-                placeholder="예: 신진볼텍"
+                value=result["vendor"]
             )
 
             final_po = st.text_input(
                 "발주서번호",
-                value=po_no,
-                placeholder="예: P02504050001"
+                value=result["po_no"]
             )
 
 
         # ====================================================
-        # 파일명 생성
+        # 최종 파일명
         # ====================================================
 
         result_filename = (
@@ -809,19 +1285,22 @@ if uploaded_file is not None:
 
 
         # ====================================================
-        # 추출 상태 표시
+        # 인식 상태
         # ====================================================
 
-        st.markdown("### 🔎 인식 상태")
+        st.markdown(
+            "### 🔎 인식 상태"
+        )
 
-        status_data = [
+        status = [
             ("수주번호", final_order),
             ("의뢰일자", final_date),
             ("업체명", final_vendor),
             ("발주서번호", final_po),
         ]
 
-        for label, value in status_data:
+
+        for label, value in status:
 
             if value:
 
@@ -837,7 +1316,7 @@ if uploaded_file is not None:
 
 
         # ====================================================
-        # OCR 원문 보기
+        # OCR 원문
         # ====================================================
 
         with st.expander(
@@ -850,41 +1329,55 @@ if uploaded_file is not None:
 
 
         # ====================================================
-        # OCR 영역 확인
-        # 디버깅용
+        # OCR 단어 위치 디버깅
         # ====================================================
 
         with st.expander(
-            "🛠 OCR 인식 영역 확인"
+            "🛠 OCR이 실제로 읽은 단어 보기"
         ):
 
-            st.write(
-                "현재 발주서 양식에서 다음 영역을 별도로 확대하여 OCR합니다."
-            )
+            if all_words:
 
-            st.image(
-                regions["vendor"],
-                caption="업체명 인식 영역",
-                use_container_width=True
-            )
+                # 중복 제거
+                seen = set()
+                display_words = []
 
-            st.image(
-                regions["order_no"],
-                caption="수주번호 인식 영역",
-                use_container_width=True
-            )
+                for word in all_words:
 
-            st.image(
-                regions["date"],
-                caption="의뢰일자 인식 영역",
-                use_container_width=True
-            )
+                    key = (
+                        word["text"],
+                        word["left"],
+                        word["top"]
+                    )
 
-            st.image(
-                regions["po_no"],
-                caption="발주서번호 인식 영역",
-                use_container_width=True
-            )
+                    if key in seen:
+                        continue
+
+                    seen.add(key)
+
+                    display_words.append(
+                        word
+                    )
+
+                display_words.sort(
+                    key=lambda x: (
+                        x["top"],
+                        x["left"]
+                    )
+                )
+
+                for word in display_words[:300]:
+
+                    st.write(
+                        f'{word["text"]} '
+                        f'(신뢰도 {word["conf"]:.0f})'
+                    )
+
+            else:
+
+                st.write(
+                    "OCR 단어를 찾지 못했습니다."
+                )
 
 
     except Exception as e:
