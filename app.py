@@ -34,7 +34,7 @@ if uploaded_file is not None:
             with st.spinner("AI가 문서를 정밀 분석 중입니다..."):
                 text = pytesseract.image_to_string(image, lang='kor+eng')
                 
-                # 1. 수주번호 추출 (H로 시작하는 패턴 우선)
+                # 1. 수주번호 추출 (H로 시작하는 패턴 우선 탐색)
                 order_no = ""
                 order_match = re.search(r'(H[0-9]{6}[A-Za-z0-9\-]+)', text)
                 if order_match:
@@ -44,19 +44,23 @@ if uploaded_file is not None:
                     if alt_order:
                         order_no = alt_order.group(1).strip()
 
-                # 2. 의뢰일자 추출 (문서 내에 있는 202x년 형태의 8자리 숫자 전부 탐색)
+                # 2. 의뢰일자 추출 (20xx-xx-xx, 20xx.xx.xx, 20xx/xx/xx 및 8자리 숫자 모두 완벽 대응)
                 date = ""
-                all_dates = re.findall(r'(20[2-9][0-9][0-9]{4})', text)
-                if all_dates:
-                    # 보통 문서 상단에 나오는 첫 번째나 두 번째 8자리 숫자가 의뢰일자입니다.
-                    date = all_dates[0]
+                date_match = re.search(r'(20[2-9][0-9][-/.][0-9]{2}[-/.][0-9]{2})', text)
+                if date_match:
+                    # 하이픈, 점, 슬래시를 제거하여 순수 8자리 숫자로 변환 (예: 20250416)
+                    date = date_match.group(1).strip().replace("-", "").replace(".", "").replace("/", "")
+                else:
+                    # 기호 없이 8자리 숫자로 붙어있는 경우 대비
+                    all_dates = re.findall(r'(20[2-9][0-9][0-9]{4})', text)
+                    if all_dates:
+                        date = all_dates[0]
 
-                # 3. 업체명 추출 (문서 전체에서 협력사 이름 직접 탐색)
+                # 3. 업체명 자동 추출 ('업체소재지' 또는 'Vendor Address' 바로 뒤에 나오는 회사명 단어 추출)
                 vendor = ""
-                if "신진볼텍" in text or "SHINJIN" in text.upper():
-                    vendor = "신진볼텍"
-                elif "동남" in text or "DONGNAM" in text.upper():
-                    vendor = "동남"
+                vendor_match = re.search(r'(?:업체소재지|Vendor\s*Address)[^\w]*([가-힣a-zA-Z0-9\(\)]+)', text)
+                if vendor_match:
+                    vendor = vendor_match.group(1).strip()
                 else:
                     vendor = "업체명확인필요"
 
