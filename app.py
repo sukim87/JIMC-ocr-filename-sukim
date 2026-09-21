@@ -1,7 +1,6 @@
 import streamlit as st
 import pytesseract
 from PIL import Image
-import pandas as pd
 import re
 import os
 
@@ -32,86 +31,78 @@ if uploaded_file is not None:
         if image:
             st.image(image, caption="업로드된 문서 미리보기", use_container_width=True)
             
-            with st.spinner("AI가 문서 좌표를 정밀 분석 중입니다..."):
-                # 1. 단어별 좌표 데이터를 포함하여 추출 (영역 이탈 방지용)
-                df = pytesseract.image_to_string(image, lang='kor+eng') # 전체 텍스트 수주/발주서용
-                data_df = pytesseract.image_to_data(image, output_type=pytesseract.Output.DATAFRAME, lang='kor+eng')
-                data_df = data_df[data_df.text.notnull() & (data_df.text.str.strip() != '')]
-
-                # 2. 수주번호 추출
+            with st.spinner("AI가 문서를 분석 중입니다..."):
+                text = pytesseract.image_to_string(image, lang='kor+eng')
+                lines = [line.strip() for line in text.split('\n') if line.strip()]
+                
+                # 1. 수주번호 추출
                 order_no = ""
-                order_match = re.search(r'(H[0-9]{6}[A-Za-z0-9\-]+)', df)
+                order_match = re.search(r'(H[0-9]{6}[A-Za-z0-9\-]+)', text)
                 if order_match:
                     order_no = order_match.group(1).strip()
                 else:
-                    alt_order = re.search(r'수주번호[^\w]*([A-Za-z0-9\-]+)', df)
+                    alt_order = re.search(r'수주번호[^\w]*([A-Za-z0-9\-]+)', text)
                     if alt_order:
                         order_no = alt_order.group(1).strip()
 
-                # 3. [좌표 제한] 의뢰일자 추출 ('의뢰일자' 또는 'Issue Date'가 있는 행의 우측만 탐색)
+                # 2. 의뢰일자 추출 (문서 내 날짜 패턴 최우선 탐색)
                 date = ""
-                date_labels = data_df[data_df['text'].str.contains('의뢰일자|Issue|Date', na=False)]
-                if not date_labels.empty:
-                    d_row = date_labels.iloc[0]
-                    d_top, d_left = d_row['top'], d_row['left']
-                    
-                    # 같은 행(top ±30 픽셀)이고 오른쪽에 있는 텍스트만 필터링
-                    row_tokens = data_df[
-                        (data_df['top'] >= d_top - 25) & 
-                        (data_df['top'] <= d_top + 45) & 
-                        (data_df['left'] > d_left)
-                    ].sort_values(by=['left'])
-                    
-                    for _, r in row_tokens.iterrows():
-                        w = r['text'].strip()
-                        date_m = re.search(r'(20[2-9][0-9][-/.][0-9]{2][-/.][0-9]{2})', w)
-                        if date_m:
-                            date = date_m.group(1).replace('-', '').replace('.', '').replace('/', '')
-                            break
-                        digits = re.sub(r'[^0-9]', '', w)
+                # 날짜 패턴 전수 조사 (예: 2025-04-16, 2025.04.16 등)
+                date_candidates = re.findall(r'(20[2-9][0-9][\s\-./]*[0-9]{2}[\s\-./]*[0-9]{2})', text)
+                if date_candidates:
+                    # 가장 먼저 발견된 유효한 날짜 사용
+                    for dc in date_candidates:
+                        digits = re.sub(r'[^0-9]', '', dc)
                         if len(digits) == 8 and digits.startswith('20'):
                             date = digits
                             break
-
-                # 만약 좌표로 못 찾았을 경우 일반 검색 보조
+                
+                # 만약 못 찾았으면 '의뢰일자' 또는 'Issue Date' 주변 라벨 탐색
                 if not date:
-                    date_m2 = re.search(r'(20[2-9][0-9][-/.][0-9]{2][-/.][0-9]{2})', df)
-                    if date_m2:
-                        date = date_m2.group(1).replace('-', '').replace('.', '').replace('/', '')
-
-                # 4. [좌표 제한] 업체명 추출 ('업체소재지'가 있는 행의 우측/위쪽 영역만 엄격히 제한)
-                vendor = ""
-                vendor_labels = data_df[data_df['text'].str.contains('업체소재지|Vendor|Address', na=False)]
-                if not vendor_labels.empty:
-                    v_row = vendor_labels.iloc[0]
-                    v_top, v_left = v_row['top'], v_row['left']
-                    
-                    # '업체소재지' 셀과 동일하거나 바로 위쪽(상호명이 위치한 행), 그리고 오른쪽에 있는 단어들만 수집
-                    cell_tokens = data_df[
-                        (data_df['top'] >= v_top - 35) & 
-                        (data_df['top'] <= v_top + 45) & 
-                        (data_df['left'] > v_left - 20)
-                    ].sort_values(by=['top', 'left'])
-                    
-                    for _, r in cell_tokens.iterrows():
-                        w = r['text'].strip()
-                        # 주소 단어, 라벨명, 특수문자 제외하고 순수 상호명 후보 포착
-                        clean_w = re.sub(r'[^가-힣a-zA-Z0-9]', '', w)
-                        if len(clean_w) >= 2 and clean_w.lower() not in ['vendor', 'address', '업체소재지']:
-                            if not any(loc in clean_w for loc in ["경상", "경기", "충청", "서울", "부산", "대구", "인천", "광주", "대전", "울산", "강원", "전라", "제주", "창원", "시", "군", "구", "읍", "면", "동", "길", "로", "번지"]):
-                                vendor = clean_w
+                    for idx, line in enumerate(lines):
+                        if "의뢰일자" in line or "Issue" in line:
+                            # 현재 줄 및 다음 줄들에서 숫자 조합 탐색
+                            search_chunk = " ".join(lines[idx:idx+2])
+                            d_match = re.search(r'([0-9]{4}[-/.][0-9]{2}[-/.][0-9]{2})', search_chunk)
+                            if d_match:
+                                date = re.sub(r'[^0-9]', '', d_match.group(1))
                                 break
+
+                # 3. 업체명 추출 (업체소재지 / Vendor Address 기준 강력 탐색)
+                vendor = ""
+                for idx, line in enumerate(lines):
+                    if "업체소재지" in line or "Vendor" in line or "Address" in line:
+                        # 해당 줄 및 바로 다음 줄까지 후보군으로 결합
+                        target_chunk = line
+                        if idx + 1 < len(lines):
+                            target_chunk += " " + lines[idx + 1]
+                        if idx + 2 < len(lines):
+                            target_chunk += " " + lines[idx + 2]
+                        
+                        # 라벨 및 주소 키워드, 특수문자 제거 후 단어 추출
+                        cleaned = re.sub(r'업체소재지|Vendor|Address|[\(\)\-\.,0-9]', '', target_chunk).strip()
+                        words = cleaned.split()
+                        
+                        for w in words:
+                            clean_w = re.sub(r'[^가-힣a-zA-Z0-9]', '', w)
+                            if len(clean_w) >= 2 and clean_w.lower() not in ['vendor', 'address']:
+                                # 행정구역 및 일반 명사 제외
+                                if not any(loc in clean_w for loc in ["경상", "경기", "충청", "서울", "부산", "대구", "인천", "광주", "대전", "울산", "강원", "전라", "제주", "창원", "시", "군", "구", "읍", "면", "동", "길", "로", "번지"]):
+                                    vendor = clean_w
+                                    break
+                        if vendor:
+                            break
 
                 if not vendor or len(vendor) < 2:
                     vendor = "업체명확인필요"
 
-                # 5. 발주서번호 추출
+                # 4. 발주서번호 추출
                 po_no = ""
-                po_match = re.search(r'(P[0-9]{10,})', df)
+                po_match = re.search(r'(P[0-9]{10,})', text)
                 if po_match:
                     po_no = po_match.group(1).strip()
                 else:
-                    alt_po = re.search(r'발주서[^\w]*번호[^\w]*([A-Za-z0-9]+)', df)
+                    alt_po = re.search(r'발주서[^\w]*번호[^\w]*([A-Za-z0-9]+)', text)
                     if alt_po:
                         po_no = alt_po.group(1).strip()
 
