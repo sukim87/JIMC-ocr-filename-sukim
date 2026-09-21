@@ -15,10 +15,9 @@ st.markdown("---")
 
 
 # ============================================================
-# 🔧 헬퍼 함수
+# 🔧 헬퍼
 # ============================================================
 def is_address_like(text: str) -> bool:
-    """주소로 보이는 텍스트 판별"""
     if re.fullmatch(r'[\d\s\-().]+', text):
         return True
     if any(k in text for k in ['광역시', '특별시', '특별자치', '번길', '사우', '층']):
@@ -28,13 +27,58 @@ def is_address_like(text: str) -> bool:
     return False
 
 
-def extract_vendor_name(data_df: pd.DataFrame, full_text: str) -> str:
+def clean_text(txt: str) -> str:
+    txt = re.sub(r'\s+', '', txt)
+    txt = re.sub(r'[^가-힣a-zA-Z0-9()&.\-]', '', txt)
+    return txt
+
+
+def ocr_cell(cropped: Image.Image) -> str:
     """
-    '업체소재지' 앵커의 우측 값 셀에서 상호명만 정밀 추출
-    - 라벨 셀에 포함된 'Vendor', 'Address' 영어 라벨을 완전 차단
-    - 앵커와 같은 행(회사명 줄)의 토큰만 사용하여 주소 줄 배제
+    잘라낸 셀 이미지를 업스케일 + 이진화 후 한글 위주로 OCR
+    여러 PSM/lang 조합을 시도해서 가장 그럴듯한 결과 반환
     """
-    # 1) 앵커 찾기 (한글 우선, 없으면 영문)
+    # 업스케일 4배
+    w, h = cropped.size
+    if w < 20 or h < 10:
+        return ""
+    img = cropped.convert('L').resize((w * 4, h * 4), Image.LANCZOS)
+
+    # 이진화 (배경 흰색, 글자 검정)
+    img = img.point(lambda x: 0 if x < 150 else 255, '1')
+
+    candidates = []
+    # lang별, psm별 시도
+    for lang in ['kor', 'kor+eng']:
+        for psm in [7, 6, 8, 13]:
+            try:
+                txt = pytesseract.image_to_string(
+                    img, lang=lang, config=f'--psm {psm}'
+                )
+            except Exception:
+                continue
+            c = clean_text(txt)
+            if len(c) < 2:
+                continue
+            if is_address_like(c):
+                continue
+            if not re.search(r'[가-힣]', c):
+                continue
+            kor_cnt = sum(1 for ch in c if '가' <= ch <= '힣')
+            candidates.append((c, kor_cnt, lang, psm))
+
+    if not candidates:
+        return ""
+
+    # 한글 글자수 많은 순 → 길이 순
+    candidates.sort(key=lambda x: (-x[1], -len(x[0])))
+    return candidates[0][0]
+
+
+def extract_vendor_name(image: Image.Image,
+                        data_df: pd.DataFrame,
+                        full_text: str) -> str:
+    # ---------- 1) 앵커 찾기 ----------
     kor_anchors = data_df[data_df['text'].str.contains('업체|소재지', na=False)]
     if not kor_anchors.empty:
         anchor = kor_anchors.sort_values(
@@ -46,73 +90,72 @@ def extract_vendor_name(data_df: pd.DataFrame, full_text: str) -> str:
             return ""
         anchor = eng.sort_values(by='top').iloc[0]
 
-    a_top, a_left = anchor['top'], anchor['left']
-    a_width, a_height = anchor['width'], anchor['height']
+    a_top = int(anchor['top'])
+    a_left = int(anchor['left'])
+    a_width = int(anchor['width'])
+    a_height = int(anchor['height'])
 
-    # 2) 라벨 셀의 '진짜 오른쪽 경계' 계산
-    #    (업체소재지 + Vendor + Address 중 가장 오른쪽 끝)
+    # ---------- 2) 라벨 셀 오른쪽 경계 ----------
     row_band = data_df[
         (data_df['top'] >= a_top - 5) &
         (data_df['top'] <= a_top + a_height + 35)
     ]
-    label_mask = row_band['text'].str.contains(
+    label_tokens = row_band[row_band['text'].str.contains(
         r'업체|소재지|Vendor|Address', na=False, case=False, regex=True
-    )
-    label_tokens = row_band[label_mask]
+    )]
     if not label_tokens.empty:
-        label_cell_right = (label_tokens['left'] + label_tokens['width']).max()
-    else:
-        label_cell_right = a_left + a_width
-
-    # 3) 값 셀에서 '앵커와 같은 행'만 후보로 (주소 줄 완전 차단)
-    value_tokens = data_df[
-        (data_df['left'] > label_cell_right + 2) &
-        (data_df['top'] >= a_top - 8) &
-        (data_df['top'] <= a_top + a_height + 8) &
-        (data_df['conf'] >= 15)
-    ].copy()
-
-    # 4) 영어 라벨 단어 완전 차단
-    noise_re = re.compile(
-        r'(vendor|address|inspected|reviewed|approved|by|order|customer|'
-        r'deliver|item|material|remark|result)',
-        re.IGNORECASE
-    )
-    value_tokens = value_tokens[
-        ~value_tokens['text'].str.contains(noise_re, na=False, regex=True)
-    ]
-
-    if value_tokens.empty:
-        m = re.search(
-            r'([가-힣A-Za-z][가-힣A-Za-z0-9]{1,}'
-            r'(?:머티리얼|테크|산업|정밀|소재|전자|화학|시스템|솔루션|상사|공업))',
-            full_text
+        label_right = int(
+            (label_tokens['left'] + label_tokens['width']).max()
         )
-        return m.group(1) if m else ""
+    else:
+        label_right = a_left + a_width
 
-    # 5) 같은 행 토큰 좌→우 병합
-    value_tokens = value_tokens.sort_values(by='left')
-    merged = ''.join(value_tokens['text'].str.strip().tolist())
-    merged = re.sub(r'\s+', '', merged)
-    merged = re.sub(r'[^가-힣a-zA-Z0-9()&.\-]', '', merged)
+    # ---------- 3) 값 셀(회사명 줄)만 크롭 ----------
+    #   y: 앵커 top 부근 (회사명이 있는 줄)
+    #   x: 라벨 오른쪽 ~ 충분히 오른쪽
+    cell_x1 = max(0, label_right + 2)
+    cell_x2 = min(image.width, label_right + 420)
+    cell_y1 = max(0, a_top - 6)
+    cell_y2 = min(image.height, a_top + a_height + 8)
 
-    # 6) 검증
-    if (len(merged) >= 2
-            and re.search(r'[가-힣a-zA-Z]', merged)
-            and not is_address_like(merged)):
-        return merged
+    # 너무 좁으면 앵커 세로 길이의 1.5배로 확장
+    if cell_y2 - cell_y1 < 10:
+        cell_y2 = cell_y1 + max(20, int(a_height * 1.5))
 
-    # 7) 폴백 정규식
+    cropped = image.crop((cell_x1, cell_y1, cell_x2, cell_y2))
+
+    # ---------- 4) 크롭 셀 정밀 OCR ----------
+    vendor = ocr_cell(cropped)
+
+    # ---------- 5) 검증 ----------
+    if vendor and len(vendor) >= 2 and not is_address_like(vendor):
+        return vendor
+
+    # ---------- 6) 폴백 1: 앵커 위쪽 값 셀에서 한 번 더 시도 ----------
+    #   (라벨과 값의 baseline이 어긋난 경우 대비)
+    for dy in (-10, -20, +10):
+        y1 = max(0, cell_y1 + dy)
+        y2 = min(image.height, cell_y2 + dy)
+        cropped2 = image.crop((cell_x1, y1, cell_x2, y2))
+        v2 = ocr_cell(cropped2)
+        if v2 and len(v2) >= 2 and not is_address_like(v2):
+            return v2
+
+    # ---------- 7) 폴백 2: 전체 텍스트 정규식 ----------
     m = re.search(
         r'([가-힣A-Za-z][가-힣A-Za-z0-9]{1,}'
-        r'(?:머티리얼|테크|산업|정밀|소재|전자|화학|시스템|솔루션|상사|공업))',
+        r'(?:머티리얼|테크|산업|정밀|소재|전자|화학|시스템|솔루션|상사|공업|'
+        r'㈜|\(주\)|주식회사))',
         full_text
     )
-    return m.group(1) if m else ""
+    if m:
+        return clean_text(m.group(1))
+
+    return ""
 
 
 # ============================================================
-# 메인 로직
+# 메인
 # ============================================================
 uploaded_file = st.file_uploader(
     "파일을 업로드하세요 (PDF, JPG, PNG)",
@@ -125,7 +168,7 @@ if uploaded_file is not None:
         if uploaded_file.type == "application/pdf":
             try:
                 from pdf2image import convert_from_bytes
-                images = convert_from_bytes(uploaded_file.read())
+                images = convert_from_bytes(uploaded_file.read(), dpi=300)
                 if images:
                     image = images[0]
             except Exception as pdf_err:
@@ -137,6 +180,7 @@ if uploaded_file is not None:
             st.image(image, caption="업로드된 문서 미리보기", use_container_width=True)
 
             with st.spinner("AI가 문서를 정밀 분석 중입니다..."):
+                # 좌표 획득용 OCR (원본 해상도)
                 full_text = pytesseract.image_to_string(image, lang='kor+eng')
                 data_df = pytesseract.image_to_data(
                     image,
@@ -168,12 +212,11 @@ if uploaded_file is not None:
                 date_matches = re.findall(
                     r'(20[2-9][0-9][-/.][0-9]{2}[-/.][0-9]{2})', full_text
                 )
-                for m in date_matches:
-                    digits = re.sub(r'[^0-9]', '', m)
+                for mm in date_matches:
+                    digits = re.sub(r'[^0-9]', '', mm)
                     if len(digits) == 8 and digits.startswith('20'):
                         date = digits
                         break
-
                 if not date:
                     for _, r in data_df.iterrows():
                         digits = re.sub(r'[^0-9]', '', r['text'])
@@ -181,16 +224,14 @@ if uploaded_file is not None:
                             date = digits
                             break
 
-                # ---------- 3. 업체명 ----------
-                vendor = extract_vendor_name(data_df, full_text)
+                # ---------- 3. 업체명 (셀 크롭 + 정밀 OCR) ----------
+                vendor = extract_vendor_name(image, data_df, full_text)
                 if not vendor or len(vendor) < 2:
                     vendor = "업체명확인필요"
 
                 # ---------- 4. 발주서번호 ----------
                 po_no = ""
-                po_match = re.search(
-                    r'(PO?[0-9]{8,})', full_text, re.IGNORECASE
-                )
+                po_match = re.search(r'(PO?[0-9]{8,})', full_text, re.IGNORECASE)
                 if po_match:
                     po_no = po_match.group(1).strip()
                 else:
@@ -219,13 +260,38 @@ if uploaded_file is not None:
 
             st.info("💡 위 파일명을 복사해서 사내 파일명 변경에 사용하세요!")
 
-            # ---------- 디버깅용 (필요할 때만 체크) ----------
-            if st.checkbox("🔍 OCR 좌표 디버깅 보기"):
+            # ---------- 디버깅 ----------
+            with st.expander("🔍 OCR 좌표 디버깅 / 크롭 이미지 보기"):
                 st.dataframe(
                     data_df[['text', 'left', 'top', 'width', 'height', 'conf']]
                     .sort_values(by=['top', 'left'])
                     .reset_index(drop=True)
                 )
+                # 크롭 결과 미리보기
+                kor_anchors = data_df[data_df['text'].str.contains('업체|소재지', na=False)]
+                if not kor_anchors.empty:
+                    a = kor_anchors.sort_values(by=['top', 'conf'],
+                                                ascending=[True, False]).iloc[0]
+                    a_top = int(a['top']); a_left = int(a['left'])
+                    a_width = int(a['width']); a_height = int(a['height'])
+                    row_band = data_df[
+                        (data_df['top'] >= a_top - 5) &
+                        (data_df['top'] <= a_top + a_height + 35)
+                    ]
+                    lt = row_band[row_band['text'].str.contains(
+                        r'업체|소재지|Vendor|Address', na=False, case=False, regex=True
+                    )]
+                    label_right = int((lt['left'] + lt['width']).max()) if not lt.empty else a_left + a_width
+                    x1 = max(0, label_right + 2)
+                    x2 = min(image.width, label_right + 420)
+                    y1 = max(0, a_top - 6)
+                    y2 = min(image.height, a_top + a_height + 8)
+                    st.write(f"크롭 영역: x=({x1},{x2}), y=({y1},{y2})")
+                    st.image(
+                        image.crop((x1, y1, x2, y2)),
+                        caption="업체명 셀 크롭 결과 (여기가 선명해야 함)",
+                        use_container_width=True
+                    )
 
     except Exception as e:
         st.error(f"파일 처리 중 오류가 발생했습니다: {e}")
