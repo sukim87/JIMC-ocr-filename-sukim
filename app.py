@@ -32,7 +32,12 @@ if uploaded_file is not None:
             st.image(image, caption="업로드된 문서 미리보기", use_container_width=True)
             
             with st.spinner("AI가 문서를 정밀 분석 중입니다..."):
-                text = pytesseract.image_to_string(image, lang='kor+eng')
+                # PSM 3 (기본 자동 페이지 분할) 또는 PSM 11(스파르탄 텍스트)로 전체 텍스트 추출
+                text = pytesseract.image_to_string(image, lang='kor+eng', config='--psm 3')
+                
+                # [디버깅용] OCR이 실제로 읽어낸 원본 텍스트를 화면에 그대로 보여줍니다.
+                with st.expander("🔍 OCR이 읽어낸 원본 텍스트 보기 (확인용)"):
+                    st.text(text)
                 
                 # 1. 수주번호 추출
                 order_no = ""
@@ -44,36 +49,45 @@ if uploaded_file is not None:
                     if alt_order:
                         order_no = alt_order.group(1).strip()
 
-                # 2. 의뢰일자 추출 ('Issue Date 의뢰일자' 키워드 근처 오른쪽 영역 탐색)
+                # 2. 의뢰일자 추출 (문서 내 모든 8자리 또는 날짜 형태 전수 조사 후 매칭)
                 date = ""
-                # 'Issue Date' 또는 '의뢰일자' 키워드 뒤에 나오는 날짜 형태 강제 탐색
-                date_zone_match = re.search(r'(?:Issue\s*Date|의뢰일자)[^\n]*([0-9]{4}[-/.][0-9]{2}[-/.][0-9]{2})', text, re.IGNORECASE)
-                if date_zone_match:
-                    date = date_zone_match.group(1).strip().replace("-", "").replace(".", "").replace("/", "")
-                else:
-                    # 보조: 문서 내 첫 번째 YYYY-MM-DD 형태
-                    date_match = re.search(r'(20[2-9][0-9][-/.][0-9]{2][-/.][0-9]{2})', text)
-                    if date_match:
-                        date = date_match.group(1).strip().replace("-", "").replace(".", "").replace("/", "")
+                # 날짜 후보 모두 찾기 (예: 2025-04-16, 2025.04.16 등)
+                date_candidates = re.findall(r'(20[2-9][0-9][\s\-./]*[0-9]{2}[\s\-./]*[0-9]{2})', text)
+                if date_candidates:
+                    # 첫 번째로 매칭된 날짜에서 숫자만 추출
+                    digits = re.sub(r'[^0-9]', '', date_candidates[0])
+                    if len(digits) == 8:
+                        date = digits
+                
+                if not date:
+                    all_8 = re.findall(r'(20[2-9][0-9][0-9]{4})', text)
+                    if all_8:
+                        date = all_8[0]
 
-                # 3. 업체명 추출 ('업체소재지' 바로 오른쪽 영역의 첫 번째 상호명 탐색)
+                # 3. 업체명 추출 (텍스트 전체에서 알려진 상호명이나 패턴 강제 매칭)
                 vendor = ""
-                # '업체소재지' 또는 'Vendor Address' 키워드 바로 뒤에 오는 텍스트 추출
-                vendor_zone_match = re.search(r'(?:업체소재지|Vendor\s*Address)\s*([^\n\r]+)', text, re.IGNORECASE)
-                if vendor_zone_match:
-                    raw_target = vendor_zone_match.group(1).strip()
-                    # 첫 번째 단어가 'Vendor'나 'Address' 같은 잔여물일 경우 그 다음 단어 선택
-                    words = raw_target.split()
-                    for w in words:
-                        clean_w = re.sub(r'[^가-힣a-zA-Z0-9]', '', w)
-                        if clean_w and clean_w.lower() not in ['vendor', 'address'] and len(clean_w) >= 2:
-                            # 행정구역(경상남도 등)이 첫 단어로 잡히지 않게 방어
-                            if not any(loc in clean_w for loc in ["경상", "경기", "충청", "서울", "부산", "대구", "인천", "광주", "대전", "울산", "강원", "전라", "제주"]):
-                                vendor = clean_w
+                # 만약 텍스트 내에 '신진볼텍'이나 '대진상사' 같은 상호명이 포함되어 있다면 직접 잡아내기 위한 리스트 검사
+                known_vendors = ["신진볼텍", "대진상사", "성화산업", "덕영테크"]
+                for kv in known_vendors:
+                    if kv in text:
+                        vendor = kv
+                        break
+                
+                # 리스트에 없으면 '업체소재지' 근처의 단어들 중 행정구역이 아닌 첫 번째 한글 단어 강제 추출
+                if not vendor:
+                    words = text.split()
+                    for i, w in enumerate(words):
+                        if "업체소재지" in w or "Vendor" in w:
+                            # 뒤에 오는 단어들 중 주소가 아닌 첫 단어 선택
+                            for next_w in words[i+1:i+10]:
+                                clean_nw = re.sub(r'[^가-힣]', '', next_w)
+                                if len(clean_nw) >= 2 and not any(loc in clean_nw for loc in ["경상남도", "경기도", "충청도", "서울", "부산", "대구", "인천", "광주", "대전", "울산", "강원", "전라", "제주", "시", "군", "구", "읍", "면", "동", "길", "로"]):
+                                    vendor = clean_nw
+                                    break
+                            if vendor:
                                 break
 
-                # 만약 위에서 못 잡았을 경우의 예외 처리
-                if not vendor or len(vendor) < 2:
+                if not vendor:
                     vendor = "업체명확인필요"
 
                 # 4. 발주서번호 추출
