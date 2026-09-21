@@ -35,7 +35,6 @@ if uploaded_file is not None:
             st.image(image, caption="업로드된 문서 미리보기", use_container_width=True)
             
             with st.spinner("AI가 문서를 정밀 분석 중입니다..."):
-                # 1. 이미지 전처리 완화 (강제 이진화 제거, 그레이스케일만 적용하여 한글 획 보존)
                 img_np = np.array(image)
                 if len(img_np.shape) == 3:
                     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
@@ -44,13 +43,13 @@ if uploaded_file is not None:
                 
                 processed_image = Image.fromarray(gray)
 
-                # 2. 테서셋 설정 (PSM을 3 또는 11로 주어 한글/영어 혼용 표 인식률 향상)
+                # PSM 3(자동 페이지 분할)로 전체 텍스트 추출
                 custom_config = r'--oem 3 --psm 3'
                 full_text = pytesseract.image_to_string(processed_image, lang='kor+eng', config=custom_config)
                 data_df = pytesseract.image_to_data(processed_image, output_type=pytesseract.Output.DATAFRAME, lang='kor+eng', config=custom_config)
                 data_df = data_df[data_df.text.notnull() & (data_df.text.str.strip() != '')]
 
-                # 3. 수주번호 추출
+                # 1. 수주번호 추출
                 order_no = ""
                 order_match = re.search(r'(H[0-9]{6}[A-Za-z0-9\-]+)', full_text)
                 if order_match:
@@ -60,7 +59,7 @@ if uploaded_file is not None:
                     if alt_order:
                         order_no = alt_order.group(1).strip()
 
-                # 4. 의뢰일자 추출
+                # 2. 의뢰일자 추출
                 date = ""
                 date_matches = re.findall(r'(20[2-9][0-9][-/.][0-9]{2][-/.][0-9]{2})', full_text)
                 if date_matches:
@@ -77,49 +76,51 @@ if uploaded_file is not None:
                             date = digits
                             break
 
-                # 5. 업체명 추출 ('업체소재지' 우측 칸의 한글 상호명 타겟팅)
+                # 3. 업체명 추출 (관점 변경: '업체소재지' 키워드 주변이나 상호명 패턴을 텍스트 줄 단위로 탐색)
                 vendor = ""
-                vendor_label = data_df[data_df['text'].str.contains('업체소재지|Vendor', na=False)]
-                if not vendor_label.empty:
-                    v_row = vendor_label.iloc[0]
-                    v_top, v_left, v_width = v_row['top'], v_row['left'], v_row['width']
-                    
-                    cell_right_min = v_left + v_width - 5
-                    cell_right_max = cell_right_min + 350
-                    
-                    right_tokens = data_df[
-                        (data_df['left'] >= cell_right_min) & 
-                        (data_df['left'] <= cell_right_max) & 
-                        (data_df['top'] >= v_top - 15) & 
-                        (data_df['top'] <= v_top + 35)
-                    ].sort_values(by=['top', 'left'])
-                    
-                    if not right_tokens.empty:
-                        min_top = right_tokens['top'].min()
-                        top_line = right_tokens[
-                            (right_tokens['top'] >= min_top - 8) & 
-                            (right_tokens['top'] <= min_top + 8)
-                        ].sort_values(by='left')
-                        
-                        extracted_words = []
-                        for _, r in top_line.iterrows():
-                            w = r['text'].strip()
-                            if any(k in w.lower() for k in ['vendor', 'address', '업체소재지', '결재']):
+                lines = [line.strip() for line in full_text.split('\n') if line.strip()]
+                
+                for i, line in enumerate(lines):
+                    # '업체소재지'나 'Vendor'가 포함된 줄을 찾음
+                    if '업체소재지' in line or 'Vendor' in line:
+                        # 만약 같은 줄에 주소나 다른 텍스트가 길게 붙어있지 않고, 바로 윗줄이나 아랫줄에 상호명이 있는 경우 대비
+                        # 보통 상호명이 '업체소재지' 우측 상단에 위치하므로, 해당 줄 또는 바로 윗줄을 검사
+                        target_candidates = []
+                        if i > 0:
+                            target_candidates.append(lines[i-1])
+                        target_candidates.append(line)
+                        if i < len(lines) - 1:
+                            target_candidates.append(lines[i+1])
+                            
+                        for candidate in target_candidates:
+                            # 키워드 자체 제거
+                            cleaned = candidate
+                            for kw in ['업체소재지', 'Vendor', 'Address', 'vendor address', '결재']:
+                                cleaned = cleaned.replace(kw, '')
+                            
+                            # 주소 관련 단어(시, 구, 로, 길, 동, 호 등)가 포함된 긴 주소 줄은 상호명이 아니므로 스킵
+                            if any(addr_k in cleaned for addr_k in ['로', '길', '동', '호', '부산', '창원', '시', '구']):
                                 continue
-                            if any(addr_k in w for addr_k in ['로', '길', '동', '호', '부산', '창원', '시', '구']):
-                                continue
-                            # 한글 및 영문, 숫자만 허용
-                            clean_w = re.sub(r'[^가-힣a-zA-Z0-9]', '', w)
-                            if len(clean_w) > 0:
-                                extracted_words.append(clean_w)
-                        
-                        if extracted_words:
-                            vendor = "".join(extracted_words)
+                                
+                            clean_w = re.sub(r'[^가-힣a-zA-Z0-9]', '', cleaned)
+                            if len(clean_w) >= 2:
+                                vendor = clean_w
+                                break
+                    if vendor:
+                        break
+
+                # 만약 위 방식으로도 못 찾았다면, 데이터프레임에서 '에스앤피' 같은 공장/업체명 키워드를 직접 전수 검색
+                if not vendor or len(vendor) < 2:
+                    for _, r in data_df.iterrows():
+                        txt = r['text'].strip()
+                        if '에스앤피' in txt or '머티리얼' in txt or '볼텍' in txt:
+                            vendor = re.sub(r'[^가-힣a-zA-Z0-9]', '', txt)
+                            break
 
                 if not vendor or len(vendor) < 2:
                     vendor = "업체명확인필요"
 
-                # 6. 발주서번호 추출
+                # 4. 발주서번호 추출
                 po_no = ""
                 po_match = re.search(r'(PO?[0-9]{8,})', full_text, re.IGNORECASE)
                 if po_match:
