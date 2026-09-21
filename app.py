@@ -89,32 +89,40 @@ if uploaded_file is not None:
                             date = digits
                             break
 
-                # 3. 업체명 추출 ('업체소재지' 레이블 기준 살짝 위쪽의 상호명 셀 정밀 타겟팅)
+                # 3. 업체명 추출 (우측 칸 안에서 세로 좌표가 가장 높은 '최상단 첫 번째 줄'만 정밀 타겟팅)
                 vendor = ""
                 vendor_label = data_df[data_df['text'].str.contains('업체소재지|Vendor', na=False)]
                 if not vendor_label.empty:
-                    v_row = vendor_label.iloc[0]
-                    v_top, v_left = v_row['top'], v_row['left']
+                    v_row = vendor_label.sort_values(by='top').iloc[0]
+                    v_top, v_left, v_width = v_row['top'], v_row['left'], v_row['width']
                     
-                    # '업체소재지'보다 위쪽(약 5~35 픽셀 위)에 위치한 상호명 행만 정확히 수집
-                    vendor_tokens = data_df[
-                        (data_df['top'] >= v_top - 32) & 
-                        (data_df['top'] <= v_top - 3) & 
-                        (data_df['left'] > v_left - 20)
-                    ].sort_values(by=['left'])
+                    # '업체소재지' 레이블 우측 영역에 있는 텍스트들 수집
+                    right_cell_left = v_left + v_width - 10
+                    right_tokens = data_df[
+                        (data_df['left'] >= right_cell_left) &
+                        (data_df['top'] >= v_top - 20) &
+                        (data_df['top'] <= v_top + 35)
+                    ].sort_values(by=['top', 'left'])
                     
-                    extracted_words = []
-                    for _, r in vendor_tokens.iterrows():
-                        w = r['text'].strip()
-                        # 주소나 불필요한 레이블 단어 제외
-                        if any(k in w for k in ["업체소재지", "Vendor", "Address", "경기도", "경상", "충청", "전라", "서울", "부산", "대구", "인천", "광주", "대전", "울산", "강원", "제주"]):
-                            continue
-                        clean_w = re.sub(r'[^가-힣a-zA-Z0-9]', '', w)
-                        if len(clean_w) > 0:
-                            extracted_words.append(clean_w)
-                    
-                    if extracted_words:
-                        vendor = "".join(extracted_words)
+                    if not right_tokens.empty:
+                        # 그중 가장 위에 있는 줄(가장 작은 top 값)을 가진 토큰 그룹만 추출
+                        min_top = right_tokens['top'].min()
+                        top_line_tokens = right_tokens[
+                            (right_tokens['top'] >= min_top - 6) &
+                            (right_tokens['top'] <= min_top + 6)
+                        ].sort_values(by='left')
+                        
+                        extracted_words = []
+                        for _, r in top_line_tokens.iterrows():
+                            w = r['text'].strip()
+                            if any(k in w.lower() for k in ['vendor', 'address', '업체소재지']):
+                                continue
+                            clean_w = re.sub(r'[^가-힣a-zA-Z0-9]', '', w)
+                            if len(clean_w) > 0:
+                                extracted_words.append(clean_w)
+                        
+                        if extracted_words:
+                            vendor = "".join(extracted_words)
 
                 if not vendor or len(vendor) < 2:
                     vendor = "업체명확인필요"
