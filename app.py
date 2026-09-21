@@ -47,21 +47,22 @@ if uploaded_file is not None:
                     if alt_order:
                         order_no = alt_order.group(1).strip()
 
-                # 2. 의뢰일자 추출: RIN 번호 바로 아래 칸 탐색
+                # 2. 의뢰일자 추출: '의뢰일자' 또는 'Issue Date' 레이블 바로 아래 칸 탐색
                 date = ""
-                rin_label = data_df[data_df['text'].str.contains('RIN', na=False)]
-                if not rin_label.empty:
-                    rin_row = rin_label.iloc[0]
-                    rin_top, rin_left = rin_row['top'], rin_row['left']
+                date_label = data_df[data_df['text'].str.contains('의뢰일자|Issue|Date', na=False)]
+                if not date_label.empty:
+                    d_row = date_label.iloc[0]
+                    d_top, d_left = d_row['top'], d_row['left']
                     
-                    rin_below = data_df[
-                        (data_df['top'] >= rin_top + 15) & 
-                        (data_df['top'] <= rin_top + 65) & 
-                        (data_df['left'] >= rin_left - 20) &
-                        (data_df['left'] <= rin_left + 180)
+                    # '의뢰일자' 글자 바로 아랫줄 영역 필터링
+                    date_below = data_df[
+                        (data_df['top'] >= d_top + 10) & 
+                        (data_df['top'] <= d_top + 60) & 
+                        (data_df['left'] >= d_left - 30) &
+                        (data_df['left'] <= d_left + 180)
                     ].sort_values(by=['top', 'left'])
                     
-                    for _, r in rin_below.iterrows():
+                    for _, r in date_below.iterrows():
                         w = r['text'].strip()
                         date_m = re.search(r'([0-9]{4}[-/.][0-9]{2}[-/.][0-9]{2})', w)
                         if date_m:
@@ -74,30 +75,31 @@ if uploaded_file is not None:
                             date = digits_only
                             break
 
+                # 보조 Fallback (전체 텍스트 날짜 검색)
                 if not date:
                     date_match = re.search(r'(20[2-9][0-9][-/.][0-9]{2][-/.][0-9]{2})', full_text)
                     if date_match:
                         date = re.sub(r'[^0-9]', '', date_match.group(1))
 
-                # 3. 업체명 추출: '업체소재지' 옆 상단 영역 (상호명이 잘리지 않도록 높이 확보 후 주소 제외)
+                # 3. 업체명 추출: '업체소재지' 레이블 바로 옆 칸에서 주소는 확실히 제외하고 상호명만 추출
                 vendor = ""
                 vendor_label = data_df[data_df['text'].str.contains('업체소재지|Vendor', na=False)]
                 if not vendor_label.empty:
                     v_row = vendor_label.iloc[0]
                     v_top, v_left = v_row['top'], v_row['left']
                     
-                    # 상호명이 위치한 상단 셀 영역 (세로 높이를 넉넉히 주되, 아랫줄 주소인 '경기도', '시' 등은 명확히 필터링)
+                    # '업체소재지' 우측 영역의 토큰 수집
                     vendor_tokens = data_df[
                         (data_df['top'] >= v_top - 15) & 
-                        (data_df['top'] <= v_top + 35) & 
+                        (data_df['top'] <= v_top + 45) & 
                         (data_df['left'] > v_left + v_row['width'] - 10)
                     ].sort_values(by=['top', 'left'])
                     
                     extracted_words = []
                     for _, r in vendor_tokens.iterrows():
                         w = r['text'].strip()
-                        # '경기도', '시흥시' 같은 주소 시작 단어가 나오면 상호명이 끝난 것으로 판단하고 중단
-                        if any(addr_start in w for addr_start in ["경기도", "경상남도", "서울시", "부산시", "대구시", "인천시", "광주시", "대전시", "울산시", "강원도", "전라", "제주시", "충청", "시흥시", "창원시"]):
+                        # 주소나 행정구역 단어가 나오면 상호명 영역이 끝난 것으로 판단하여 즉시 중단
+                        if any(addr_start in w for addr_start in ["경기도", "경상", "충청", "전라", "서울", "부산", "대구", "인천", "광주", "대전", "울산", "강원", "제주", "시", "군", "구", "읍", "면", "동", "로", "길", "호"]):
                             break
                         
                         clean_w = re.sub(r'[^가-힣a-zA-Z0-9]', '', w)
