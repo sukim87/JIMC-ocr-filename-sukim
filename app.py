@@ -47,22 +47,21 @@ if uploaded_file is not None:
                     if alt_order:
                         order_no = alt_order.group(1).strip()
 
-                # 2. 의뢰일자 추출: '의뢰일자' 또는 'Issue Date' 레이블 바로 아래 칸 탐색
+                # 2. 의뢰일자 추출 (최우선: 전체 텍스트에서 20xx-xx-xx 형태의 날짜를 무조건 찾아냄)
                 date = ""
-                date_label = data_df[data_df['text'].str.contains('의뢰일자|Issue|Date', na=False)]
-                if not date_label.empty:
-                    d_row = date_label.iloc[0]
-                    d_top, d_left = d_row['top'], d_row['left']
-                    
-                    # '의뢰일자' 글자 바로 아랫줄 영역 필터링
-                    date_below = data_df[
-                        (data_df['top'] >= d_top + 10) & 
-                        (data_df['top'] <= d_top + 60) & 
-                        (data_df['left'] >= d_left - 30) &
-                        (data_df['left'] <= d_left + 180)
-                    ].sort_values(by=['top', 'left'])
-                    
-                    for _, r in date_below.iterrows():
+                # 다양한 날짜 포맷 (예: 2025-04-01, 2025.04.01, 2025/04/01) 매칭
+                date_matches = re.findall(r'(20[2-9][0-9][-/.][0-9]{2][-/.][0-9]{2})', full_text)
+                if date_matches:
+                    # 첫 번째로 발견된 유효한 8자리 날짜 사용
+                    for m in date_matches:
+                        digits = re.sub(r'[^0-9]', '', m)
+                        if len(digits) == 8 and digits.startswith('20'):
+                            date = digits
+                            break
+
+                # 만약 위에서 못 찾았을 경우 데이터프레임에서 직접 날짜 패턴 탐색
+                if not date:
+                    for _, r in data_df.iterrows():
                         w = r['text'].strip()
                         date_m = re.search(r'([0-9]{4}[-/.][0-9]{2}[-/.][0-9]{2})', w)
                         if date_m:
@@ -70,25 +69,14 @@ if uploaded_file is not None:
                             if len(digits) == 8 and digits.startswith('20'):
                                 date = digits
                                 break
-                        digits_only = re.sub(r'[^0-9]', '', w)
-                        if len(digits_only) == 8 and digits_only.startswith('20'):
-                            date = digits_only
-                            break
 
-                # 보조 Fallback (전체 텍스트 날짜 검색)
-                if not date:
-                    date_match = re.search(r'(20[2-9][0-9][-/.][0-9]{2][-/.][0-9]{2})', full_text)
-                    if date_match:
-                        date = re.sub(r'[^0-9]', '', date_match.group(1))
-
-                # 3. 업체명 추출: '업체소재지' 레이블 바로 옆 칸에서 주소는 확실히 제외하고 상호명만 추출
+                # 3. 업체명 추출: '업체소재지' 레이블 옆 칸에서 주소는 확실히 제외하고 상호명만 추출
                 vendor = ""
                 vendor_label = data_df[data_df['text'].str.contains('업체소재지|Vendor', na=False)]
                 if not vendor_label.empty:
                     v_row = vendor_label.iloc[0]
                     v_top, v_left = v_row['top'], v_row['left']
                     
-                    # '업체소재지' 우측 영역의 토큰 수집
                     vendor_tokens = data_df[
                         (data_df['top'] >= v_top - 15) & 
                         (data_df['top'] <= v_top + 45) & 
@@ -98,7 +86,6 @@ if uploaded_file is not None:
                     extracted_words = []
                     for _, r in vendor_tokens.iterrows():
                         w = r['text'].strip()
-                        # 주소나 행정구역 단어가 나오면 상호명 영역이 끝난 것으로 판단하여 즉시 중단
                         if any(addr_start in w for addr_start in ["경기도", "경상", "충청", "전라", "서울", "부산", "대구", "인천", "광주", "대전", "울산", "강원", "제주", "시", "군", "구", "읍", "면", "동", "로", "길", "호"]):
                             break
                         
