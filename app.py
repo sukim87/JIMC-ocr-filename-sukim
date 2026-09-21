@@ -89,31 +89,28 @@ if uploaded_file is not None:
                             date = digits
                             break
 
-                # 3. 업체명 추출 (숫자, 주소 키워드가 포함된 아랫줄 조각은 원천 차단)
+                # 3. 업체명 추출 ('업체소재지' 레이블 기준 살짝 위쪽의 상호명 셀 정밀 타겟팅)
                 vendor = ""
                 vendor_label = data_df[data_df['text'].str.contains('업체소재지|Vendor', na=False)]
                 if not vendor_label.empty:
                     v_row = vendor_label.iloc[0]
                     v_top, v_left = v_row['top'], v_row['left']
                     
-                    # 상호명 라인만 정확히 타겟팅하도록 세로 범위를 좁게 설정
+                    # '업체소재지'보다 위쪽(약 5~35 픽셀 위)에 위치한 상호명 행만 정확히 수집
                     vendor_tokens = data_df[
-                        (data_df['top'] >= v_top - 12) & 
-                        (data_df['top'] <= v_top + 12) & 
-                        (data_df['left'] > v_left + v_row['width'] - 5)
+                        (data_df['top'] >= v_top - 32) & 
+                        (data_df['top'] <= v_top - 3) & 
+                        (data_df['left'] > v_left - 20)
                     ].sort_values(by=['left'])
                     
                     extracted_words = []
                     for _, r in vendor_tokens.iterrows():
                         w = r['text'].strip()
-                        # 숫자가 포함되어 있거나 주소/행정구역 단어가 포함된 경우 상호명에서 제외
-                        if any(char.isdigit() for char in w):
+                        # 주소나 불필요한 레이블 단어 제외
+                        if any(k in w for k in ["업체소재지", "Vendor", "Address", "경기도", "경상", "충청", "전라", "서울", "부산", "대구", "인천", "광주", "대전", "울산", "강원", "제주"]):
                             continue
-                        if any(k in w for k in ["로", "길", "동", "호", "시", "구", "읍", "면", "부산", "창원", "경기", "서울"]):
-                            continue
-                        
-                        clean_w = re.sub(r'[^가-힣a-zA-Z]', '', w)
-                        if len(clean_w) >= 2 and clean_w.lower() not in ['vendor', 'address', '업체소재지']:
+                        clean_w = re.sub(r'[^가-힣a-zA-Z0-9]', '', w)
+                        if len(clean_w) > 0:
                             extracted_words.append(clean_w)
                     
                     if extracted_words:
