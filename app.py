@@ -89,42 +89,21 @@ if uploaded_file is not None:
                             date = digits
                             break
 
-                # 3. 업체명 추출 ('업체소재지' 우측 칸 안에서 최상단 첫 번째 줄만 정밀 추출)
+                # 3. 업체명 추출 ('업체소재지'가 포함된 같은 줄에서 상호명만 깔끔하게 추출)
                 vendor = ""
-                vendor_label = data_df[data_df['text'].str.contains('업체소재지|Vendor', na=False)]
-                if not vendor_label.empty:
-                    v_row = vendor_label.iloc[0]
-                    v_top, v_left = v_row['top'], v_row['left']
-                    
-                    # '업체소재지' 우측 영역의 토큰들 중 상단 부근만 타겟팅
-                    right_tokens = data_df[
-                        (data_df['left'] >= v_left + 30) & 
-                        (data_df['top'] >= v_top - 15) & 
-                        (data_df['top'] <= v_top + 30)
-                    ].sort_values(by=['top', 'left'])
-                    
-                    if not right_tokens.empty:
-                        # 가장 위에 있는 줄(최소 top 값)을 가진 토큰들만 골라냄
-                        min_top = right_tokens['top'].min()
-                        top_line = right_tokens[
-                            (right_tokens['top'] >= min_top - 5) & 
-                            (right_tokens['top'] <= min_top + 6)
-                        ].sort_values(by='left')
+                text_lines = [line.strip() for line in full_text.split('\n') if line.strip()]
+                for line in text_lines:
+                    if '업체소재지' in line or 'Vendor' in line:
+                        # 라벨 텍스트 제거
+                        cleaned = line
+                        for kw in ['업체소재지', 'Vendor', 'Address', 'vendor address']:
+                            cleaned = cleaned.replace(kw, '')
                         
-                        extracted_words = []
-                        for _, r in top_line.iterrows():
-                            w = r['text'].strip()
-                            if any(k in w.lower() for k in ['vendor', 'address', '업체소재지']):
-                                continue
-                            # 주소 관련 단어나 행정구역 키워드가 포함되면 상호명에서 제외
-                            if any(addr_k in w for addr_k in ['로', '길', '동', '호', '부산', '창원', '시', '구']):
-                                continue
-                            clean_w = re.sub(r'[^가-힣a-zA-Z0-9]', '', w)
-                            if len(clean_w) > 0:
-                                extracted_words.append(clean_w)
-                        
-                        if extracted_words:
-                            vendor = "".join(extracted_words)
+                        # 특수문자 및 공백 정리 후 한글/영문 상호명만 추출
+                        cleaned = re.sub(r'[^가-힣a-zA-Z0-9]', '', cleaned)
+                        if len(cleaned) >= 2:
+                            vendor = cleaned
+                            break
 
                 if not vendor or len(vendor) < 2:
                     vendor = "업체명확인필요"
