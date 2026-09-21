@@ -47,9 +47,8 @@ if uploaded_file is not None:
                     if alt_order:
                         order_no = alt_order.group(1).strip()
 
-                # 2. 의뢰일자 추출 (개선됨: 잘 안 읽히는 날짜 조각 및 다양한 포맷 포착)
+                # 2. 의뢰일자 추출
                 date = ""
-                # 먼저 전체 텍스트에서 8자리 형태 탐색
                 date_matches = re.findall(r'(20[2-9][0-9][-/.][0-9]{2][-/.][0-9]{2})', full_text)
                 if date_matches:
                     for m in date_matches:
@@ -58,7 +57,6 @@ if uploaded_file is not None:
                             date = digits
                             break
 
-                # 만약 안 잡히면 '의뢰일자' 또는 'Issue Date' 라벨 하단/우측 칸 영역을 공격적으로 탐색
                 if not date:
                     date_label = data_df[data_df['text'].str.contains('의뢰일자|Issue|Date', na=False)]
                     if not date_label.empty:
@@ -74,19 +72,16 @@ if uploaded_file is not None:
                         
                         for _, r in date_tokens.iterrows():
                             w = r['text'].strip()
-                            # 숫자와 기호만 추출
                             clean_w = re.sub(r'[^0-9\-/.]', '', w)
                             digits = re.sub(r'[^0-9]', '', clean_w)
                             
-                            if len(digits) == 8: # 20250401 형태
-                                if digits.startswith('20'):
-                                    date = digits
-                                    break
-                            elif len(digits) == 4: # 만약 0401 처럼 월/일만 잡히면 앞에 '2025' 연도를 유추해서 결합 (현재 연도 기준 등)
+                            if len(digits) == 8 and digits.startswith('20'):
+                                date = digits
+                                break
+                            elif len(digits) == 4:
                                 date = "2025" + digits
                                 break
 
-                # 그래도 없으면 문서 내에 있는 모든 숫자 덩어리 중 8자리(20으로 시작) 탐색
                 if not date:
                     for _, r in data_df.iterrows():
                         digits = re.sub(r'[^0-9]', '', r['text'])
@@ -94,7 +89,7 @@ if uploaded_file is not None:
                             date = digits
                             break
 
-                # 3. 업체명 추출: '업체소재지' 레이블 옆 칸에서 주소는 확실히 제외하고 상호명만 추출
+                # 3. 업체명 추출 (주소 제외, 상호명만 깔끔하게)
                 vendor = ""
                 vendor_label = data_df[data_df['text'].str.contains('업체소재지|Vendor', na=False)]
                 if not vendor_label.empty:
@@ -123,15 +118,38 @@ if uploaded_file is not None:
                 if not vendor or len(vendor) < 2:
                     vendor = "업체명확인필요"
 
-                # 4. 발주서번호 추출
+                # 4. 발주서번호 추출 (개선됨: PO로 시작하는 번호 및 알파벳 혼합 패턴 포착)
                 po_no = ""
-                po_match = re.search(r'(P[0-9]{10,})', full_text)
+                po_match = re.search(r'(PO?[0-9]{8,})', full_text, re.IGNORECASE)
                 if po_match:
                     po_no = po_match.group(1).strip()
                 else:
-                    alt_po = re.search(r'발주서[^\w]*번호[^\w]*([A-Za-z0-9]+)', full_text)
-                    if alt_po:
-                        po_no = alt_po.group(1).strip()
+                    # '발주서 번호' 또는 'Po No' 라벨 우측/하단 영역 탐색
+                    po_label = data_df[data_df['text'].str.contains('발주서|Po|No', na=False)]
+                    if not po_label.empty:
+                        for _, p_row in po_label.iterrows():
+                            p_top, p_left = p_row['top'], p_row['left']
+                            po_tokens = data_df[
+                                (data_df['top'] >= p_top - 15) & 
+                                (data_df['top'] <= p_top + 45) & 
+                                (data_df['left'] >= p_left) &
+                                (data_df['left'] <= p_left + 200)
+                            ].sort_values(by=['top', 'left'])
+                            
+                            for _, r in po_tokens.iterrows():
+                                w = r['text'].strip()
+                                if re.search(r'P[A-Za-z0-9]{8,}', w, re.IGNORECASE):
+                                    clean_po = re.sub(r'[^A-Za-z0-9]', '', w)
+                                    if len(clean_po) >= 8:
+                                        po_no = clean_po
+                                        break
+                            if po_no:
+                                break
+
+                    if not po_no:
+                        alt_po = re.search(r'발주서[^\w]*번호[^\w]*([A-Za-z0-9]+)', full_text)
+                        if alt_po:
+                            po_no = alt_po.group(1).strip()
 
             st.success("분석 완료!")
             
