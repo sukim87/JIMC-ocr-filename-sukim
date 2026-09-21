@@ -38,34 +38,57 @@ if uploaded_file is not None:
                 order_no = ""
                 order_match = re.search(r'(H[0-9]{6}[A-Za-z0-9\-]+)', text)
                 if order_match:
-                    order_no = order_match.group(1).strip()
+                    order_match_str = order_match.group(1).strip()
+                    # OCR 오인식 방지 보정 (O -> 0 등)
+                    order_no = order_match_str.replace('O', '0').replace('o', '0')
                 else:
                     alt_order = re.search(r'수주번호[^\w]*([A-Za-z0-9\-]+)', text)
                     if alt_order:
                         order_no = alt_order.group(1).strip()
 
-                # 2. 의뢰일자 추출 (YYYY-MM-DD 등 형태 탐색 후 8자리로 변환)
+                # 2. 의뢰일자 추출 (문서 내 모든 날짜 후보를 찾아 첫 번째 것을 채택)
                 date = ""
-                date_match = re.search(r'(20[2-9][0-9][-/.][0-9]{2][-/.][0-9]{2})', text)
-                if date_match:
-                    date = date_match.group(1).strip().replace("-", "").replace(".", "").replace("/", "")
+                # 구분자가 있는 날짜 패턴 (예: 2025-04-01, 2025.04.01 등)
+                date_candidates = re.findall(r'(20[2-9][0-9][-/.][0-9]{2][-/.][0-9]{2})', text)
+                if date_candidates:
+                    date = date_candidates[0].strip().replace("-", "").replace(".", "").replace("/", "")
                 else:
-                    all_dates = re.findall(r'(20[2-9][0-9][0-9]{4})', text)
-                    if all_dates:
-                        date = all_dates[0]
+                    # 구분자 없는 8자리 날짜 패턴 (예: 20250401)
+                    all_8digit = re.findall(r'(20[2-9][0-9][0-9]{4})', text)
+                    if all_8digit:
+                        date = all_8digit[0]
 
-                # 3. 업체명 추출: '업체소재지' 또는 'Vendor Address' 바로 오른쪽 칸의 첫 번째 단어 픽업
+                # 3. 업체명 추출 (키워드 이후 텍스트에서 주소/우편번호 이전의 첫 단어 추출)
                 vendor = ""
-                vendor_match = re.search(r'(?:업체소재지|Vendor\s*Address)\s*([\S]+)', text, re.IGNORECASE)
-                if vendor_match:
-                    candidate = vendor_match.group(1).strip()
-                    # 혹시라도 라벨 조각이 딸려온 경우 방어
-                    if candidate.lower() not in ['vendor', 'address']:
-                        vendor = candidate
+                # '업체소재지' 또는 'Vendor Address' 이후의 모든 텍스트를 대상로 설정
+                pos = text.find("업체소재지")
+                if pos == -1:
+                    pos = text.find("Vendor Address")
+                if pos == -1:
+                    pos = text.find("Vendor")
 
-                # 만약 위에서 못 잡았을 경우의 안전 장치
+                if pos != -1:
+                    sub_text = text[pos:]
+                    # 라벨 단어들 제거
+                    sub_text = re.sub(r'업체소재지|Vendor\s*Address|Vendor', '', sub_text, flags=re.IGNORECASE).strip()
+                    # 공백이나 줄바꿈으로 분리
+                    tokens = sub_text.split()
+                    for token in tokens:
+                        clean_token = re.sub(r'[^가-힣a-zA-Z0-9]', '', token)
+                        # 우편번호(숫자만 5~6자리)나 행정구역명, 괄호 등은 업체명이 아니므로 패스
+                        if clean_token and not clean_token.isdigit() and len(clean_token) >= 2:
+                            if not any(loc in clean_token for loc in ["경기", "경남", "경북", "충남", "충북", "전남", "전북", "서울", "부산", "대구", "인천", "광주", "대전", "울산", "강원", "제주", "시", "구", "군", "동", "로", "길"]):
+                                vendor = clean_token
+                                break
+
+                # 만약 위 방식으로도 못 찾았을 경우, 문서 상단에서 가장 유력한 한글/영문 상호명 추출
                 if not vendor or len(vendor) < 2:
-                    vendor = "업체명확인필요"
+                    lines = text.split('\n')
+                    for line in lines[:8]:
+                        cleaned_line = re.sub(r'[^가-힣a-zA-Z]', '', line)
+                        if len(cleaned_line) >= 2 and not any(k in cleaned_line for k in ["구매", "담당", "자재", "품질", "검사", "인수", "의뢰서", "보고서", "소재지", "Procurement", "Quality"]):
+                            vendor = cleaned_line
+                            break
 
                 # 4. 발주서번호 추출
                 po_no = ""
