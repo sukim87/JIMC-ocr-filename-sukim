@@ -16,11 +16,18 @@ uploaded_file = st.file_uploader("파일을 업로드하세요 (PDF, JPG, PNG)",
 
 if uploaded_file is not None:
     try:
+        image = None
+        # PDF 파일 처리
         if uploaded_file.type == "application/pdf":
-            from pdf2image import convert_from_bytes
-            images = convert_from_bytes(uploaded_file.read())
-            image = images[0] if images else None
+            try:
+                from pdf2image import convert_from_bytes
+                images = convert_from_bytes(uploaded_file.read())
+                if images:
+                    image = images[0]
+            except Exception as pdf_err:
+                st.error(f"PDF 변환 중 오류 발생 (poppler 설치 확인 필요): {pdf_err}")
         else:
+            # 일반 이미지 파일 처리
             image = Image.open(uploaded_file)
 
         if image:
@@ -29,7 +36,7 @@ if uploaded_file is not None:
             with st.spinner("AI가 문서를 정밀 분석 중입니다..."):
                 text = pytesseract.image_to_string(image, lang='kor+eng')
                 
-                # 수주번호 추출
+                # 1. 수주번호 추출
                 order_no = ""
                 order_match = re.search(r'(?:Order\s*No\.?|수주번호)[:\s]*([A-Za-z0-9\-]+)', text, re.IGNORECASE)
                 if order_match:
@@ -39,7 +46,7 @@ if uploaded_file is not None:
                     if alt_order:
                         order_no = alt_order.group(1).strip()
 
-                # 의뢰일자 추출
+                # 2. 의뢰일자 추출
                 date = ""
                 date_match = re.search(r'(?:의뢰일자|Date|Issue\s*Date)[\s\.:]*([0-9]{8})', text, re.IGNORECASE)
                 if date_match:
@@ -49,7 +56,7 @@ if uploaded_file is not None:
                     if all_dates:
                         date = all_dates[0]
 
-                # 업체명 추출
+                # 3. 업체명 추출
                 vendor = ""
                 if "신진볼텍" in text or "SHINJIN" in text.upper():
                     vendor = "신진볼텍"
@@ -62,9 +69,9 @@ if uploaded_file is not None:
                     else:
                         vendor = "업체명확인필요"
 
-                # 발주서번호 추출
+                # 4. 발주서번호 추출
                 po_no = ""
-                po_match = re.search(r'(?:Po\s*No\.?|발주서\s*번호)[:\s]*([A-Za-z0-9]+)', text, re.IGNORECASE)
+                po_match = re.search(r'(?:Po\s*No\.?|발주서\s*번호)[:\s]*([A-Zi-z0-9]+)', text, re.IGNORECASE)
                 if po_match:
                     po_no = po_match.group(1).strip()
                 else:
