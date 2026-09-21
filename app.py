@@ -89,46 +89,35 @@ if uploaded_file is not None:
                             date = digits
                             break
 
-                # 3. 업체명 추출 (요청하신 빨간 동그라미 상단 칸 위치 정밀 타겟팅)
+                # 3. 업체명 추출 (숫자, 주소 키워드가 포함된 아랫줄 조각은 원천 차단)
                 vendor = ""
                 vendor_label = data_df[data_df['text'].str.contains('업체소재지|Vendor', na=False)]
                 if not vendor_label.empty:
                     v_row = vendor_label.iloc[0]
                     v_top, v_left = v_row['top'], v_row['left']
                     
-                    # '업체소재지' 레이블 바로 우측이면서 주소 아랫줄로 내려가지 않도록 상하 폭을 상호명 라인에만 딱 맞춤
+                    # 상호명 라인만 정확히 타겟팅하도록 세로 범위를 좁게 설정
                     vendor_tokens = data_df[
-                        (data_df['top'] >= v_top - 15) & 
-                        (data_df['top'] <= v_top + 18) & 
+                        (data_df['top'] >= v_top - 12) & 
+                        (data_df['top'] <= v_top + 12) & 
                         (data_df['left'] > v_left + v_row['width'] - 5)
                     ].sort_values(by=['left'])
                     
                     extracted_words = []
                     for _, r in vendor_tokens.iterrows():
                         w = r['text'].strip()
-                        clean_w = re.sub(r'[^가-힣a-zA-Z0-9]', '', w)
+                        # 숫자가 포함되어 있거나 주소/행정구역 단어가 포함된 경우 상호명에서 제외
+                        if any(char.isdigit() for char in w):
+                            continue
+                        if any(k in w for k in ["로", "길", "동", "호", "시", "구", "읍", "면", "부산", "창원", "경기", "서울"]):
+                            continue
+                        
+                        clean_w = re.sub(r'[^가-힣a-zA-Z]', '', w)
                         if len(clean_w) >= 2 and clean_w.lower() not in ['vendor', 'address', '업체소재지']:
                             extracted_words.append(clean_w)
                     
                     if extracted_words:
                         vendor = "".join(extracted_words)
-
-                # 만약 위 좌표로 못 찾았을 경우 전체 텍스트에서 '업체소재지' 바로 다음 줄 단어 캐치
-                if not vendor or len(vendor) < 2:
-                    text_lines = [line.strip() for line in full_text.split('\n') if line.strip()]
-                    for i, line in enumerate(text_lines):
-                        if '업체소재지' in line or 'Vendor' in line:
-                            # 같은 줄이나 바로 다음 줄에서 주소 키워드가 없는 첫 번째 한글/영문 단어 선택
-                            for look_ahead in range(i, min(i + 3, len(text_lines))):
-                                candidate = text_lines[look_ahead]
-                                for token in candidate.split():
-                                    clean_t = re.sub(r'[^가-힣a-zA-Z]', '', token)
-                                    if len(clean_t) >= 2 and not any(k in clean_t for k in ['업체소재지', 'Vendor', 'Address', '경기도', '경상남도', '시', '군', '구', '동', '로', '길']):
-                                        vendor = clean_t
-                                        break
-                                if vendor and vendor != "업체명확인필요":
-                                    break
-                            break
 
                 if not vendor or len(vendor) < 2:
                     vendor = "업체명확인필요"
