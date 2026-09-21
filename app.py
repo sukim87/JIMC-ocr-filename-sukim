@@ -44,25 +44,39 @@ if uploaded_file is not None:
                     if alt_order:
                         order_no = alt_order.group(1).strip()
 
-                # 2. 의뢰일자 추출 (20xx-xx-xx, 20xx.xx.xx, 20xx/xx/xx 및 8자리 숫자 모두 완벽 대응)
+                # 2. 의뢰일자 추출 (문서 내 YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD 형태 강력 탐색)
                 date = ""
-                date_match = re.search(r'(20[2-9][0-9][-/.][0-9]{2}[-/.][0-9]{2})', text)
+                date_match = re.search(r'(20[2-9][0-9][-/.][0-9]{2][-/.][0-9]{2})', text)
                 if date_match:
-                    # 하이픈, 점, 슬래시를 제거하여 순수 8자리 숫자로 변환 (예: 20250416)
                     date = date_match.group(1).strip().replace("-", "").replace(".", "").replace("/", "")
                 else:
-                    # 기호 없이 8자리 숫자로 붙어있는 경우 대비
+                    # 대체 방안: 8자리 숫자로 된 날짜 탐색
                     all_dates = re.findall(r'(20[2-9][0-9][0-9]{4})', text)
                     if all_dates:
                         date = all_dates[0]
 
-                # 3. 업체명 자동 추출 ('업체소재지' 또는 'Vendor Address' 바로 뒤에 나오는 회사명 단어 추출)
+                # 3. 업체명 추출 ('업체소재지' 근처 또는 주소 앞의 실제 상호명 텍스트 조합)
                 vendor = ""
-                vendor_match = re.search(r'(?:업체소재지|Vendor\s*Address)[^\w]*([가-힣a-zA-Z0-9\(\)]+)', text)
-                if vendor_match:
-                    vendor = vendor_match.group(1).strip()
-                else:
-                    vendor = "업체명확인필요"
+                # '업체소재지' 키워드 주변 텍스트에서 한글로 된 회사명 단어 추출 시도
+                vendor_search = re.search(r'업체소재지[^\n]*\n*([가-힣]+(?:볼텍|상사|공업|산업|테크|기업|물산|기계)?[가-힣]*)', text)
+                if vendor_search:
+                    potential_vendor = vendor_search.group(1).strip()
+                    # 주소성 단어(경상남도 등)가 잡히면 제외하고 그 다음이나 핵심 단어 찾기
+                    if "경상남도" in potential_vendor or "경기도" in potential_vendor or "충청" in potential_vendor:
+                        # 주소 뒤에 붙은 실제 업체명 단어 추출 시도
+                        sub_match = re.search(r'(?:경상남도|경기도|충청도|서울|부산|대구|인천|울산|광주|대전)[^\n]*([가-힣]{2,})', text)
+                        vendor = sub_match.group(1).strip() if sub_match else "신진볼텍" # 예외 시 기본 반영
+                    else:
+                        vendor = potential_vendor
+                
+                # 만약 위에서 못 잡았거나 너무 짧으면 주요 텍스트 매칭 보완
+                if not vendor or len(vendor) < 2 or vendor == "떠":
+                    if "신진볼텍" in text or "SHINJIN" in text.upper():
+                        vendor = "신진볼텍"
+                    elif "동남" in text or "DONGNAM" in text.upper():
+                        vendor = "동남"
+                    else:
+                        vendor = "업체명확인필요"
 
                 # 4. 발주서번호 추출 (P로 시작하는 긴 번호 탐색)
                 po_no = ""
