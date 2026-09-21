@@ -47,28 +47,52 @@ if uploaded_file is not None:
                     if alt_order:
                         order_no = alt_order.group(1).strip()
 
-                # 2. 의뢰일자 추출 (최우선: 전체 텍스트에서 20xx-xx-xx 형태의 날짜를 무조건 찾아냄)
+                # 2. 의뢰일자 추출 (개선됨: 잘 안 읽히는 날짜 조각 및 다양한 포맷 포착)
                 date = ""
-                # 다양한 날짜 포맷 (예: 2025-04-01, 2025.04.01, 2025/04/01) 매칭
+                # 먼저 전체 텍스트에서 8자리 형태 탐색
                 date_matches = re.findall(r'(20[2-9][0-9][-/.][0-9]{2][-/.][0-9]{2})', full_text)
                 if date_matches:
-                    # 첫 번째로 발견된 유효한 8자리 날짜 사용
                     for m in date_matches:
                         digits = re.sub(r'[^0-9]', '', m)
                         if len(digits) == 8 and digits.startswith('20'):
                             date = digits
                             break
 
-                # 만약 위에서 못 찾았을 경우 데이터프레임에서 직접 날짜 패턴 탐색
+                # 만약 안 잡히면 '의뢰일자' 또는 'Issue Date' 라벨 하단/우측 칸 영역을 공격적으로 탐색
+                if not date:
+                    date_label = data_df[data_df['text'].str.contains('의뢰일자|Issue|Date', na=False)]
+                    if not date_label.empty:
+                        d_row = date_label.iloc[0]
+                        d_top, d_left = d_row['top'], d_row['left']
+                        
+                        date_tokens = data_df[
+                            (data_df['top'] >= d_top - 10) & 
+                            (data_df['top'] <= d_top + 55) & 
+                            (data_df['left'] >= d_left - 40) &
+                            (data_df['left'] <= d_left + 180)
+                        ].sort_values(by=['top', 'left'])
+                        
+                        for _, r in date_tokens.iterrows():
+                            w = r['text'].strip()
+                            # 숫자와 기호만 추출
+                            clean_w = re.sub(r'[^0-9\-/.]', '', w)
+                            digits = re.sub(r'[^0-9]', '', clean_w)
+                            
+                            if len(digits) == 8: # 20250401 형태
+                                if digits.startswith('20'):
+                                    date = digits
+                                    break
+                            elif len(digits) == 4: # 만약 0401 처럼 월/일만 잡히면 앞에 '2025' 연도를 유추해서 결합 (현재 연도 기준 등)
+                                date = "2025" + digits
+                                break
+
+                # 그래도 없으면 문서 내에 있는 모든 숫자 덩어리 중 8자리(20으로 시작) 탐색
                 if not date:
                     for _, r in data_df.iterrows():
-                        w = r['text'].strip()
-                        date_m = re.search(r'([0-9]{4}[-/.][0-9]{2}[-/.][0-9]{2})', w)
-                        if date_m:
-                            digits = re.sub(r'[^0-9]', '', date_m.group(1))
-                            if len(digits) == 8 and digits.startswith('20'):
-                                date = digits
-                                break
+                        digits = re.sub(r'[^0-9]', '', r['text'])
+                        if len(digits) == 8 and digits.startswith('20'):
+                            date = digits
+                            break
 
                 # 3. 업체명 추출: '업체소재지' 레이블 옆 칸에서 주소는 확실히 제외하고 상호명만 추출
                 vendor = ""
