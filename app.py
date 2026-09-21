@@ -89,25 +89,23 @@ if uploaded_file is not None:
                             date = digits
                             break
 
-                # 3. 업체명 추출 (주소 제외, 상호명만 깔끔하게)
+                # 3. 업체명 추출 (요청하신 빨간 동그라미 상단 칸 위치 정밀 타겟팅)
                 vendor = ""
                 vendor_label = data_df[data_df['text'].str.contains('업체소재지|Vendor', na=False)]
                 if not vendor_label.empty:
                     v_row = vendor_label.iloc[0]
                     v_top, v_left = v_row['top'], v_row['left']
                     
+                    # '업체소재지' 레이블 바로 우측이면서 주소 아랫줄로 내려가지 않도록 상하 폭을 상호명 라인에만 딱 맞춤
                     vendor_tokens = data_df[
                         (data_df['top'] >= v_top - 15) & 
-                        (data_df['top'] <= v_top + 45) & 
-                        (data_df['left'] > v_left + v_row['width'] - 10)
-                    ].sort_values(by=['top', 'left'])
+                        (data_df['top'] <= v_top + 18) & 
+                        (data_df['left'] > v_left + v_row['width'] - 5)
+                    ].sort_values(by=['left'])
                     
                     extracted_words = []
                     for _, r in vendor_tokens.iterrows():
                         w = r['text'].strip()
-                        if any(addr_start in w for addr_start in ["경기도", "경상", "충청", "전라", "서울", "부산", "대구", "인천", "광주", "대전", "울산", "강원", "제주", "시", "군", "구", "읍", "면", "동", "로", "길", "호"]):
-                            break
-                        
                         clean_w = re.sub(r'[^가-힣a-zA-Z0-9]', '', w)
                         if len(clean_w) >= 2 and clean_w.lower() not in ['vendor', 'address', '업체소재지']:
                             extracted_words.append(clean_w)
@@ -115,16 +113,32 @@ if uploaded_file is not None:
                     if extracted_words:
                         vendor = "".join(extracted_words)
 
+                # 만약 위 좌표로 못 찾았을 경우 전체 텍스트에서 '업체소재지' 바로 다음 줄 단어 캐치
+                if not vendor or len(vendor) < 2:
+                    text_lines = [line.strip() for line in full_text.split('\n') if line.strip()]
+                    for i, line in enumerate(text_lines):
+                        if '업체소재지' in line or 'Vendor' in line:
+                            # 같은 줄이나 바로 다음 줄에서 주소 키워드가 없는 첫 번째 한글/영문 단어 선택
+                            for look_ahead in range(i, min(i + 3, len(text_lines))):
+                                candidate = text_lines[look_ahead]
+                                for token in candidate.split():
+                                    clean_t = re.sub(r'[^가-힣a-zA-Z]', '', token)
+                                    if len(clean_t) >= 2 and not any(k in clean_t for k in ['업체소재지', 'Vendor', 'Address', '경기도', '경상남도', '시', '군', '구', '동', '로', '길']):
+                                        vendor = clean_t
+                                        break
+                                if vendor and vendor != "업체명확인필요":
+                                    break
+                            break
+
                 if not vendor or len(vendor) < 2:
                     vendor = "업체명확인필요"
 
-                # 4. 발주서번호 추출 (개선됨: PO로 시작하는 번호 및 알파벳 혼합 패턴 포착)
+                # 4. 발주서번호 추출
                 po_no = ""
                 po_match = re.search(r'(PO?[0-9]{8,})', full_text, re.IGNORECASE)
                 if po_match:
                     po_no = po_match.group(1).strip()
                 else:
-                    # '발주서 번호' 또는 'Po No' 라벨 우측/하단 영역 탐색
                     po_label = data_df[data_df['text'].str.contains('발주서|Po|No', na=False)]
                     if not po_label.empty:
                         for _, p_row in po_label.iterrows():
